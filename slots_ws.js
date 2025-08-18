@@ -103,6 +103,7 @@ function loadFeePayer() {
 }
 loadFeePayer(); 
 
+
 const slotsPending = new Map(); 
 
 const FIXED_BET_TYPE = 0;   
