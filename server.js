@@ -348,12 +348,16 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
 // Slots WS (uses your dice program rails)
+// ---- Slots WS ----
 try {
-  require("./slots_ws.js").attachSlots(io);
-  console.log("Slots WS mounted");
+  const slotsPath = require.resolve(__dirname + "/slots_ws.js");
+  const slots = require(slotsPath);
+  slots.attachSlots(io);
+  console.log("Slots WS mounted from", slotsPath);
 } catch (e) {
-  console.warn("slots_ws not found / failed to mount:", e?.message || e);
+  console.error("slots_ws not found / failed to mount:", e);
 }
+
 
 // Crash WS (separate crash program, uses CRASH_PROGRAM_ID internally)
 try {
