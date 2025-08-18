@@ -349,7 +349,7 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 // Slots WS (uses your dice program rails)
 try {
-  require("./slots_ws").attachSlots(io);
+  require("./slots_ws.js").attachSlots(io);
   console.log("Slots WS mounted");
 } catch (e) {
   console.warn("slots_ws not found / failed to mount:", e?.message || e);
