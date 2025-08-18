@@ -137,13 +137,18 @@ function pendingPdaFor(playerPk, nonce) {
 
 // server fee-payer (used only for resolve; lock remains user-paid)
 function feePayer() {
-  const keyPath =
-    process.env.SOLANA_KEYPAIR ||
-    process.env.ANCHOR_WALLET ||
-    path.join(os.homedir(), ".config/solana/id.json");
-  const sk = Uint8Array.from(JSON.parse(fs.readFileSync(keyPath, "utf8")));
-  return Keypair.fromSecretKey(sk);
+  let secret;
+  if (process.env.SOLANA_KEYPAIR) {
+    secret = Uint8Array.from(JSON.parse(process.env.SOLANA_KEYPAIR));
+  } else {
+    const keyPath =
+      process.env.ANCHOR_WALLET ||
+      path.join(os.homedir(), ".config/solana/id.json");
+    secret = Uint8Array.from(JSON.parse(fs.readFileSync(keyPath, "utf8")));
+  }
+  return Keypair.fromSecretKey(secret);
 }
+
 
 // ---------- Rounds (per socket) ----------
 const rounds = new Map(); // nonce -> { playerPk, betLamports, startTs, crashed, cashed, crashAtMul, timer, clientSeed, serverSeed }
