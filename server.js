@@ -3,11 +3,11 @@ require("dotenv").config();
 
 const http = require("http");
 const { Server } = require("socket.io");
-
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const crypto = require("crypto");
+
 const {
   Connection,
   PublicKey,
@@ -17,7 +17,7 @@ const {
   ComputeBudgetProgram,
 } = require("@solana/web3.js");
 
-// ---- Dice/shared helpers (same as before) ----
+// ---- Dice/shared helpers ----
 const { deriveVaultPda, deriveAdminPda, buildEd25519VerifyIx } = require("./solana");
 const { roll1to100 } = require("./rng");
 const { ADMIN_PK, buildMessageBytes, signMessageEd25519 } = require("./signer");
@@ -25,21 +25,31 @@ const { ADMIN_PK, buildMessageBytes, signMessageEd25519 } = require("./signer");
 // ---- Cluster / Programs ----
 const CLUSTER = process.env.CLUSTER || "https://api.devnet.solana.com";
 
-// Dice/Slots program (your existing one)
+// Dice/Slots program (required)
 if (!process.env.PROGRAM_ID) throw new Error("PROGRAM_ID missing in .env");
 const PROGRAM_ID = new PublicKey(process.env.PROGRAM_ID);
 
-// (Optional) Crash & Plinko program IDs are used by their WS modules;
-// we expose them in /health/all for convenience if present:
-const CRASH_PROGRAM_ID = process.env.CRASH_PROGRAM_ID || process.env.NEXT_PUBLIC_CRASH_PROGRAM_ID || "";
-const PLINKO_PROGRAM_ID = process.env.PLINKO_PROGRAM_ID || process.env.NEXT_PUBLIC_PLINKO_PROGRAM_ID || "";
+// Optional: Crash & Plinko program IDs (shown in /health/all)
+const CRASH_PROGRAM_ID =
+  process.env.CRASH_PROGRAM_ID ||
+  process.env.NEXT_PUBLIC_CRASH_PROGRAM_ID ||
+  "";
+
+const PLINKO_PROGRAM_ID =
+  process.env.PLINKO_PROGRAM_ID ||
+  process.env.NEXT_PUBLIC_PLINKO_PROGRAM_ID ||
+  "";
 
 // Shared RPC connection for dice REST
 const connection = new Connection(CLUSTER, "confirmed");
 
-// ---- DB wiring ----
+// ---- DB wiring (optional) ----
 let db;
-try { db = require("./db"); } catch { db = {}; }
+try {
+  db = require("./db");
+} catch {
+  db = {};
+}
 global.db = db;
 
 // ---- Anchor discriminator + arg encoders (dice) ----
@@ -96,9 +106,22 @@ function resolveBetKeys({ player, vaultPda, adminPda, pendingBetPda }) {
   ];
 }
 
-// ---- Express app (dice REST unchanged) ----
+// ---- Express app ----
 const app = express();
-app.use(cors());
+
+// CORS (allow multiple origins via comma-separated env, else *)
+const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || "*")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin: ALLOW_ORIGINS.length === 1 && ALLOW_ORIGINS[0] === "*" ? "*" : ALLOW_ORIGINS,
+    methods: ["GET", "POST", "OPTIONS"],
+    credentials: false,
+  })
+);
 app.use(bodyParser.json());
 
 // Basic health
@@ -217,7 +240,9 @@ app.post("/bets/deposit_prepare", async (req, res) => {
         expiry: Number(expiryUnix),
         signature_base58: "",
       });
-    } catch (e) { console.error("DB record error:", e); }
+    } catch (e) {
+      console.error("DB record error:", e);
+    }
 
     res.json({
       nonce: String(nonce),
@@ -326,7 +351,9 @@ app.post("/bets/resolve_prepare", async (req, res) => {
         roll,
         payout: payoutLamports,
       });
-    } catch (e) { console.error("DB update error:", e); }
+    } catch (e) {
+      console.error("DB update error:", e);
+    }
 
     res.json({
       roll,
@@ -345,31 +372,47 @@ app.post("/bets/resolve_prepare", async (req, res) => {
 // ---- HTTP server + Socket.IO ----
 const PORT = Number(process.env.PORT || 4000);
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+
+const io = new Server(server, {
+  cors: {
+    origin:
+      ALLOW_ORIGINS.length === 1 && ALLOW_ORIGINS[0] === "*"
+        ? "*"
+        : ALLOW_ORIGINS,
+    methods: ["GET", "POST"],
+  },
+});
+
+// Helper: mount WS module defensively (supports both default export or { attachX })
+function mountWs(modulePath, name, attachName, io) {
+  try {
+    const mod = require(modulePath);
+    const fn =
+      typeof mod === "function"
+        ? mod
+        : typeof mod?.[attachName] === "function"
+        ? mod[attachName]
+        : null;
+
+    if (fn) {
+      fn(io);
+      console.log(`${name} WS mounted`);
+    } else {
+      console.warn(`${name} WS not found / failed to mount: ${attachName} is not a function`);
+    }
+  } catch (e) {
+    console.warn(`${name} WS not found / failed to mount:`, e?.message || e);
+  }
+}
 
 // Slots WS (uses your dice program rails)
-try {
-  require("./slots_ws").attachSlots(io);
-  console.log("Slots WS mounted");
-} catch (e) {
-  console.warn("slots_ws not found / failed to mount:", e?.message || e);
-}
+mountWs("./slots_ws", "Slots", "attachSlots", io);
 
-// Crash WS (separate crash program, uses CRASH_PROGRAM_ID internally)
-try {
-  require("./crash_ws").attachCrash(io);
-  console.log("Crash WS mounted");
-} catch (e) {
-  console.warn("crash_ws not found / failed to mount:", e?.message || e);
-}
+// Crash WS (separate crash program)
+mountWs("./crash_ws", "Crash", "attachCrash", io);
 
-// Plinko WS (separate plinko program, uses PLINKO_PROGRAM_ID internally)
-try {
-  require("./plinko_ws").attachPlinko(io);
-  console.log("Plinko WS mounted");
-} catch (e) {
-  console.warn("plinko_ws not found / failed to mount:", e?.message || e);
-}
+// Plinko WS (separate plinko program)
+mountWs("./plinko_ws", "Plinko", "attachPlinko", io);
 
 server.listen(PORT, () => {
   console.log(
