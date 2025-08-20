@@ -266,14 +266,23 @@ function computeSpin({ serverSeed, clientSeed, nonce, betLamports }) {
 
 // ---------- System / fees ----------
 function loadFeePayer() {
-  const p =
-    process.env.SOLANA_KEYPAIR ||
-    process.env.ANCHOR_WALLET ||
-    path.join(os.homedir(), ".config/solana/id.json");
-  const sk = Uint8Array.from(JSON.parse(fs.readFileSync(p, "utf8")));
+  let sk;
+  if (process.env.SOLANA_KEYPAIR) {
+    // env var contains JSON array string
+    sk = Uint8Array.from(JSON.parse(process.env.SOLANA_KEYPAIR));
+  } else if (process.env.ANCHOR_WALLET) {
+    sk = Uint8Array.from(JSON.parse(fs.readFileSync(process.env.ANCHOR_WALLET, "utf8")));
+  } else {
+    // fallback to local file
+    const defaultPath = path.join(os.homedir(), ".config/solana/id.json");
+    sk = Uint8Array.from(JSON.parse(fs.readFileSync(defaultPath, "utf8")));
+  }
   return Keypair.fromSecretKey(sk);
 }
-loadFeePayer();
+
+// optional: store globally if needed
+global.feePayer = loadFeePayer();
+
 
 // ---------- State ----------
 const slotsPending = new Map(); // nonce -> ctx (if no DB present)
