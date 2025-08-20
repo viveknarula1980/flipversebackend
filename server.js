@@ -1,4 +1,4 @@
-// server.js
+
 require("dotenv").config();
 
 const http = require("http");
@@ -17,19 +17,19 @@ const {
   ComputeBudgetProgram,
 } = require("@solana/web3.js");
 
-// ---- Dice/shared helpers ----
+
 const { deriveVaultPda, deriveAdminPda, buildEd25519VerifyIx } = require("./solana");
 const { roll1to100 } = require("./rng");
 const { ADMIN_PK, buildMessageBytes, signMessageEd25519 } = require("./signer");
 
-// ---- Cluster / Programs ----
+
 const CLUSTER = process.env.CLUSTER || "https://api.devnet.solana.com";
 
-// Dice/Slots program (required)
+
 if (!process.env.PROGRAM_ID) throw new Error("PROGRAM_ID missing in .env");
 const PROGRAM_ID = new PublicKey(process.env.PROGRAM_ID);
 
-// Optional: Crash & Plinko program IDs (shown in /health/all)
+
 const CRASH_PROGRAM_ID =
   process.env.CRASH_PROGRAM_ID ||
   process.env.NEXT_PUBLIC_CRASH_PROGRAM_ID ||
@@ -40,10 +40,10 @@ const PLINKO_PROGRAM_ID =
   process.env.NEXT_PUBLIC_PLINKO_PROGRAM_ID ||
   "";
 
-// Shared RPC connection for dice REST
+
 const connection = new Connection(CLUSTER, "confirmed");
 
-// ---- DB wiring (optional) ----
+
 let db;
 try {
   db = require("./db");
@@ -52,12 +52,12 @@ try {
 }
 global.db = db;
 
-// ---- Anchor discriminator + arg encoders (dice) ----
+
 function anchorDisc(globalSnakeName) {
   return crypto.createHash("sha256").update(`global:${globalSnakeName}`).digest().slice(0, 8);
 }
 
-// PlaceBetLockArgs { bet_amount:u64, bet_type:u8, target:u8, nonce:u64, expiry_unix:i64 }
+
 function encodePlaceBetLockArgs({ betAmount, betType, target, nonce, expiryUnix }) {
   const disc = anchorDisc("place_bet_lock");
   const buf = Buffer.alloc(8 + 8 + 1 + 1 + 8 + 8);
@@ -71,7 +71,7 @@ function encodePlaceBetLockArgs({ betAmount, betType, target, nonce, expiryUnix 
   return buf;
 }
 
-// ResolveBetArgs { roll:u8, payout:u64, ed25519_instr_index:u8 }
+
 function encodeResolveBetArgs({ roll, payout, ed25519InstrIndex }) {
   const disc = anchorDisc("resolve_bet");
   const buf = Buffer.alloc(8 + 1 + 8 + 1);
@@ -106,7 +106,7 @@ function resolveBetKeys({ player, vaultPda, adminPda, pendingBetPda }) {
   ];
 }
 
-// ---- Express app ----
+
 const app = express();
 
 // CORS (allow multiple origins via comma-separated env, else *)
@@ -124,12 +124,12 @@ app.use(
 );
 app.use(bodyParser.json());
 
-// Basic health
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true, cluster: CLUSTER, programId: PROGRAM_ID.toBase58() });
 });
 
-// Multi health (dice/crash/plinko visibility)
+
 app.get("/health/all", (_req, res) => {
   res.json({
     ok: true,
@@ -140,7 +140,7 @@ app.get("/health/all", (_req, res) => {
   });
 });
 
-// Rules passthrough
+
 app.get("/rules", async (_req, res) => {
   try {
     let rules = { rtp_bps: 9900, min_bet_lamports: 50000, max_bet_lamports: 5000000000 };
@@ -155,10 +155,7 @@ app.get("/rules", async (_req, res) => {
   }
 });
 
-/**
- * STEP 1 — deposit/lock (DICE)
- * Returns a v0 tx with CU price+limit, then the place_bet_lock ix.
- */
+
 app.post("/bets/deposit_prepare", async (req, res) => {
   try {
     const { player, betAmountLamports, betType, targetNumber } = req.body || {};
@@ -173,7 +170,7 @@ app.post("/bets/deposit_prepare", async (req, res) => {
     const playerPk = new PublicKey(player);
     const betTypeNum = betType === "over" ? 1 : 0;
 
-    // Optional DB rules
+
     let rtp_bps = 9900;
     let min_bet_lamports = 50000n;
     let max_bet_lamports = 5000000000n;
@@ -202,7 +199,7 @@ app.post("/bets/deposit_prepare", async (req, res) => {
       PROGRAM_ID
     )[0];
 
-    // Anchor ix data
+
     const data = encodePlaceBetLockArgs({
       betAmount: betAmountLamports,
       betType: betTypeNum,
@@ -213,7 +210,6 @@ app.post("/bets/deposit_prepare", async (req, res) => {
     const keys = placeBetLockKeys({ player: playerPk, vaultPda, pendingBetPda });
     const programIx = { programId: PROGRAM_ID, keys, data };
 
-    // Put CU ixs first
     const cuPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
     const cuLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
 
@@ -227,7 +223,6 @@ app.post("/bets/deposit_prepare", async (req, res) => {
     const vtx = new VersionedTransaction(msgV0);
     const txBase64 = Buffer.from(vtx.serialize()).toString("base64");
 
-    // Optional persistence
     try {
       await db.recordBet?.({
         player: playerPk.toBase58(),
@@ -255,10 +250,7 @@ app.post("/bets/deposit_prepare", async (req, res) => {
   }
 });
 
-/**
- * STEP 2 — resolve (DICE)
- * Returns v0 tx with CU price+limit, ed25519 verify, then resolve_bet.
- */
+
 app.post("/bets/resolve_prepare", async (req, res) => {
   try {
     const { player, nonce: nonceStr } = req.body || {};
@@ -269,7 +261,6 @@ app.post("/bets/resolve_prepare", async (req, res) => {
     const vaultPda = deriveVaultPda();
     const adminPda = deriveAdminPda();
 
-    // fetch bet context recorded at deposit time (amount/bet_type/target)
     const nonce = BigInt(nonceStr);
     const lastBet = db.getBetByNonce ? await db.getBetByNonce(Number(nonce)) : null;
     const amount = lastBet ? Number(lastBet.bet_amount_lamports) : null;
@@ -279,7 +270,6 @@ app.post("/bets/resolve_prepare", async (req, res) => {
       return res.status(400).json({ error: "Backend missing bet context for this nonce" });
     }
 
-    // Load RTP
     let rtp_bps = 9900;
     if (db.getRules) {
       const rules = await db.getRules();
