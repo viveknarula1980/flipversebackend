@@ -406,7 +406,6 @@ function mountWs(modulePath, name, attachName, io) {
 }
 
 // Slots WS (uses your dice program rails)
-<<<<<<< HEAD
 mountWs("./slots_ws", "Slots", "attachSlots", io);
 
 // Crash WS (separate crash program)
@@ -430,7 +429,6 @@ try {
 } catch (e) {
   console.warn("crash_ws not found / failed to mount:", e?.message || e);
 }
->>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
 
 // Plinko WS (separate plinko program)
 mountWs("./plinko_ws", "Plinko", "attachPlinko", io);
