@@ -1,8 +1,4 @@
-<<<<<<< HEAD
 // slots_ws.js — RTP 85%, near-miss, fee, controlled jackpot, deterministic outcomes
-=======
-// slots_ws.js (fixed)
->>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
 const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
@@ -29,9 +25,7 @@ const SYSVAR_INSTRUCTIONS_PUBKEY = new PublicKey(
   "Sysvar1nstructions1111111111111111111111111"
 );
 
-<<<<<<< HEAD
 // ---------- Helpers: Anchor discriminator + RNG ----------
-=======
 // ---------- Robust fee payer loader (path | inline JSON | base58) ----------
 function loadFeePayer() {
   const src = (process.env.SOLANA_KEYPAIR || process.env.ANCHOR_WALLET || "").trim();
@@ -88,7 +82,6 @@ function getFeePayer() {
 // If this WS never signs/sends with a server key, you can ignore getFeePayer().
 
 // ---------- Helpers ----------
->>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
 function anchorDisc(globalSnakeName) {
   return crypto.createHash("sha256").update(`global:${globalSnakeName}`).digest().slice(0, 8);
 }
@@ -144,13 +137,10 @@ function encodePlaceBetLockArgs({ betAmount, betType, target, nonce, expiryUnix 
   let o = 0;
   disc.copy(buf, o); o += 8;
   buf.writeBigUInt64LE(BigInt(betAmount), o); o += 8;
-<<<<<<< HEAD
   buf.writeUInt8(betType & 0xff, o++);          // fixed=0
   buf.writeUInt8(target & 0xff, o++);           // fixed=50
-=======
   buf.writeUInt8(betType & 0xff, o++);          // u8
   buf.writeUInt8(target & 0xff, o++);           // u8
->>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
   buf.writeBigUInt64LE(BigInt(nonce), o); o += 8;
   buf.writeBigInt64LE(BigInt(expiryUnix), o); o += 8;
   return buf;
@@ -161,15 +151,12 @@ function encodeResolveBetArgs({ roll, payout, ed25519InstrIndex }) {
   const buf = Buffer.alloc(8 + 1 + 8 + 1);
   let o = 0;
   disc.copy(buf, o); o += 8;
-<<<<<<< HEAD
   buf.writeUInt8(roll & 0xff, o++);                 // 1 for win, 100 for loss
   buf.writeBigUInt64LE(BigInt(payout), o); o += 8;  // lamports
   buf.writeUInt8(ed25519InstrIndex & 0xff, o++);    // index of ed25519 verify ix
-=======
   buf.writeUInt8(roll & 0xff, o++);                 // u8
   buf.writeBigUInt64LE(BigInt(payout), o); o += 8;  // u64
   buf.writeUInt8(ed25519InstrIndex & 0xff, o++);    // u8
->>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
   return buf;
 }
 
@@ -338,7 +325,6 @@ function computeSpin({ serverSeed, clientSeed, nonce, betLamports }) {
   return { outcome, grid, payoutLamports };
 }
 
-<<<<<<< HEAD
 // ---------- System / fees ----------
 function loadFeePayer() {
   const p =
@@ -356,7 +342,6 @@ const FIXED_BET_TYPE = 0; // you already wired these in your program
 const FIXED_TARGET   = 50;
 
 // ---------- WebSocket API ----------
-=======
 // ---------- In-memory cache for prepared spins ----------
 const slotsPending = new Map();
 
@@ -365,7 +350,6 @@ const FIXED_BET_TYPE = 0;
 const FIXED_TARGET   = 50;
 
 // ----------------- WebSocket API -----------------
->>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
 function attachSlots(io) {
   io.on("connection", (socket) => {
     socket.on("register", ({ player }) => {
@@ -397,10 +381,8 @@ function attachSlots(io) {
         const serverSeed = crypto.randomBytes(32);
         const serverSeedHash = sha256Hex(serverSeed);
 
-<<<<<<< HEAD
         // ix: place_bet_lock
-=======
->>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
+
         const dataLock = encodePlaceBetLockArgs({
           betAmount: betLamports,
           betType: FIXED_BET_TYPE,
@@ -514,12 +496,9 @@ function attachSlots(io) {
         const roll = willWin ? 1 : 100;
         const expiryUnix = Math.floor(Date.now() / 1000) + 120;
 
-<<<<<<< HEAD
         // Admin-signed message for program verification
-=======
         // MUST match program
         const expiryUnix = Math.floor(Date.now() / 1000) + 120;
->>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
         const msg = buildMessageBytes({
           programId: PROGRAM_ID.toBuffer(),
           vault: vaultPda.toBuffer(),
@@ -534,11 +513,9 @@ function attachSlots(io) {
         });
         const edSig = await signMessageEd25519(msg);
 
-<<<<<<< HEAD
         // ed25519 verify ix (index 1)
-=======
+
         // ed25519 verify ix
->>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
         const edIx = buildEd25519VerifyIx({
           message: msg,
           signature: edSig,
