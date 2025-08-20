@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 // slots_ws.js — RTP 85%, near-miss, fee, controlled jackpot, deterministic outcomes
+=======
+// slots_ws.js (fixed)
+>>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
 const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
@@ -25,7 +29,66 @@ const SYSVAR_INSTRUCTIONS_PUBKEY = new PublicKey(
   "Sysvar1nstructions1111111111111111111111111"
 );
 
+<<<<<<< HEAD
 // ---------- Helpers: Anchor discriminator + RNG ----------
+=======
+// ---------- Robust fee payer loader (path | inline JSON | base58) ----------
+function loadFeePayer() {
+  const src = (process.env.SOLANA_KEYPAIR || process.env.ANCHOR_WALLET || "").trim();
+
+  // If unset, try default id.json if it exists; otherwise return null
+  if (!src) {
+    const def = path.join(os.homedir(), ".config/solana/id.json");
+    if (fs.existsSync(def)) {
+      const raw = fs.readFileSync(def, "utf8").trim();
+      const arr = JSON.parse(raw);
+      return Keypair.fromSecretKey(Uint8Array.from(arr));
+    }
+    return null;
+  }
+
+  // 1) Inline JSON array
+  if (src.startsWith("[") && src.endsWith("]")) {
+    const arr = JSON.parse(src);
+    return Keypair.fromSecretKey(Uint8Array.from(arr));
+  }
+
+  // 2) Base58 (heuristic: base58 charset, length >= 80)
+  if (/^[1-9A-HJ-NP-Za-km-z]+$/.test(src) && src.length >= 80) {
+    const bs58 = require("bs58");
+    const bytes = bs58.decode(src);
+    return Keypair.fromSecretKey(Uint8Array.from(bytes));
+  }
+
+  // 3) Treat as a file path. File may contain JSON or base58.
+  const raw = fs.readFileSync(src, "utf8").trim();
+  if (raw.startsWith("[")) {
+    const arr = JSON.parse(raw);
+    return Keypair.fromSecretKey(Uint8Array.from(arr));
+  } else {
+    const bs58 = require("bs58");
+    const bytes = bs58.decode(raw);
+    return Keypair.fromSecretKey(Uint8Array.from(bytes));
+  }
+}
+
+// Lazy (optional) fee payer: only load if/when you actually need it here.
+let FEE_PAYER = null;
+function getFeePayer() {
+  if (FEE_PAYER) return FEE_PAYER;
+  try {
+    FEE_PAYER = loadFeePayer();
+  } catch (e) {
+    console.warn("Fee payer not loaded for slots_ws:", e.message);
+    FEE_PAYER = null;
+  }
+  return FEE_PAYER;
+}
+// NOTE: We do NOT invoke loadFeePayer() at import-time anymore.
+// If this WS never signs/sends with a server key, you can ignore getFeePayer().
+
+// ---------- Helpers ----------
+>>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
 function anchorDisc(globalSnakeName) {
   return crypto.createHash("sha256").update(`global:${globalSnakeName}`).digest().slice(0, 8);
 }
@@ -81,8 +144,13 @@ function encodePlaceBetLockArgs({ betAmount, betType, target, nonce, expiryUnix 
   let o = 0;
   disc.copy(buf, o); o += 8;
   buf.writeBigUInt64LE(BigInt(betAmount), o); o += 8;
+<<<<<<< HEAD
   buf.writeUInt8(betType & 0xff, o++);          // fixed=0
   buf.writeUInt8(target & 0xff, o++);           // fixed=50
+=======
+  buf.writeUInt8(betType & 0xff, o++);          // u8
+  buf.writeUInt8(target & 0xff, o++);           // u8
+>>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
   buf.writeBigUInt64LE(BigInt(nonce), o); o += 8;
   buf.writeBigInt64LE(BigInt(expiryUnix), o); o += 8;
   return buf;
@@ -93,9 +161,15 @@ function encodeResolveBetArgs({ roll, payout, ed25519InstrIndex }) {
   const buf = Buffer.alloc(8 + 1 + 8 + 1);
   let o = 0;
   disc.copy(buf, o); o += 8;
+<<<<<<< HEAD
   buf.writeUInt8(roll & 0xff, o++);                 // 1 for win, 100 for loss
   buf.writeBigUInt64LE(BigInt(payout), o); o += 8;  // lamports
   buf.writeUInt8(ed25519InstrIndex & 0xff, o++);    // index of ed25519 verify ix
+=======
+  buf.writeUInt8(roll & 0xff, o++);                 // u8
+  buf.writeBigUInt64LE(BigInt(payout), o); o += 8;  // u64
+  buf.writeUInt8(ed25519InstrIndex & 0xff, o++);    // u8
+>>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
   return buf;
 }
 
@@ -264,6 +338,7 @@ function computeSpin({ serverSeed, clientSeed, nonce, betLamports }) {
   return { outcome, grid, payoutLamports };
 }
 
+<<<<<<< HEAD
 // ---------- System / fees ----------
 function loadFeePayer() {
   const p =
@@ -281,6 +356,16 @@ const FIXED_BET_TYPE = 0; // you already wired these in your program
 const FIXED_TARGET   = 50;
 
 // ---------- WebSocket API ----------
+=======
+// ---------- In-memory cache for prepared spins ----------
+const slotsPending = new Map();
+
+// Fixed rails (match your on-chain program)
+const FIXED_BET_TYPE = 0;
+const FIXED_TARGET   = 50;
+
+// ----------------- WebSocket API -----------------
+>>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
 function attachSlots(io) {
   io.on("connection", (socket) => {
     socket.on("register", ({ player }) => {
@@ -312,7 +397,10 @@ function attachSlots(io) {
         const serverSeed = crypto.randomBytes(32);
         const serverSeedHash = sha256Hex(serverSeed);
 
+<<<<<<< HEAD
         // ix: place_bet_lock
+=======
+>>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
         const dataLock = encodePlaceBetLockArgs({
           betAmount: betLamports,
           betType: FIXED_BET_TYPE,
@@ -322,6 +410,7 @@ function attachSlots(io) {
         });
         const keysLock = placeBetLockKeys({ player: playerPk, vaultPda, pendingBetPda });
         const ixLock = { programId: PROGRAM_ID, keys: keysLock, data: dataLock };
+
         const cuLimit = ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 });
 
         const { blockhash } = await connection.getLatestBlockhash("confirmed");
@@ -425,7 +514,12 @@ function attachSlots(io) {
         const roll = willWin ? 1 : 100;
         const expiryUnix = Math.floor(Date.now() / 1000) + 120;
 
+<<<<<<< HEAD
         // Admin-signed message for program verification
+=======
+        // MUST match program
+        const expiryUnix = Math.floor(Date.now() / 1000) + 120;
+>>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
         const msg = buildMessageBytes({
           programId: PROGRAM_ID.toBuffer(),
           vault: vaultPda.toBuffer(),
@@ -440,7 +534,11 @@ function attachSlots(io) {
         });
         const edSig = await signMessageEd25519(msg);
 
+<<<<<<< HEAD
         // ed25519 verify ix (index 1)
+=======
+        // ed25519 verify ix
+>>>>>>> c763f9bdff94301a275bbb7181c8a13a8ac00018
         const edIx = buildEd25519VerifyIx({
           message: msg,
           signature: edSig,
