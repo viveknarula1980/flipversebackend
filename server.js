@@ -399,7 +399,7 @@ function mountWs(modulePath, name, attachName, io) {
 mountWs("./slots_ws", "Slots", "attachSlots", io);
 
 // Crash WS (separate crash program)
-mountWs("./crash_ws", "Crash", "attachCrash", io);
+// mountWs("./crash_ws", "Crash", "attachCrash", io);
 
 // ---- Slots WS ----
 try {
