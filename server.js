@@ -480,9 +480,36 @@ let db;
 try {
   db = require("./db");
 } catch {
-  db = {};
+  db = { enabled: false };
 }
 global.db = db;
+
+// ---- Light L1 cache as belt-and-suspenders ----
+const L1 = new Map(); // key: `${player}:${nonce}` -> { amount, betType, target, savedAt, ttlMs }
+const L1_TTL_MS = (Number(process.env.L1_TTL_SECONDS || 900)) * 1000;
+
+function keyFor(player, nonce) {
+  return `${player}:${nonce}`;
+}
+function l1Put(player, nonce, ctx) {
+  L1.set(keyFor(player, nonce), { ...ctx, savedAt: Date.now(), ttlMs: L1_TTL_MS });
+}
+function l1Get(player, nonce) {
+  const v = L1.get(keyFor(player, nonce));
+  if (!v) return null;
+  if (Date.now() - v.savedAt > v.ttlMs) {
+    L1.delete(keyFor(player, nonce));
+    return null;
+  }
+  return v;
+}
+// periodic cleanup
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of L1.entries()) {
+    if (now - v.savedAt > v.ttlMs) L1.delete(k);
+  }
+}, 60_000).unref();
 
 // ---- Anchor discriminator + arg encoders (dice) ----
 function anchorDisc(globalSnakeName) {
@@ -541,8 +568,7 @@ function resolveBetKeys({ player, vaultPda, adminPda, pendingBetPda }) {
 // ---- Express app ----
 const app = express();
 
-// CORS (allow multiple origins via comma-separated env, else *)
-// e.g. ALLOW_ORIGINS="https://your-frontend.onrender.com,https://localhost:3000"
+// CORS
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || "*")
   .split(",")
   .map(s => s.trim())
@@ -559,7 +585,7 @@ app.use(bodyParser.json());
 
 // Basic health
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, cluster: CLUSTER, programId: PROGRAM_ID.toBase58() });
+  res.json({ ok: true, cluster: CLUSTER, programId: PROGRAM_ID.toBase58(), db: !!db.enabled });
 });
 
 // Multi health (dice/crash/plinko visibility)
@@ -570,6 +596,7 @@ app.get("/health/all", (_req, res) => {
     dice_program: PROGRAM_ID.toBase58(),
     crash_program: CRASH_PROGRAM_ID || null,
     plinko_program: PLINKO_PROGRAM_ID || null,
+    db: !!db.enabled,
   });
 });
 
@@ -592,8 +619,7 @@ app.get("/rules", async (_req, res) => {
 });
 
 /**
- * Generate a collision-safe nonce that still fits safely in JS Number (<= 2^53-1)
- * This keeps compatibility if your buildMessageBytes expects Number for nonce.
+ * Nonce: random u64 but also <= 2^53-1 (so we can safely cast to Number where needed)
  */
 function randomNonceSafe53() {
   const n = BigInt("0x" + crypto.randomBytes(8).toString("hex")) & ((1n << 53n) - 1n);
@@ -602,7 +628,6 @@ function randomNonceSafe53() {
 
 /**
  * STEP 1 — deposit/lock (DICE)
- * Returns a v0 tx with CU price+limit, then the place_bet_lock ix.
  */
 app.post("/bets/deposit_prepare", async (req, res) => {
   try {
@@ -618,7 +643,7 @@ app.post("/bets/deposit_prepare", async (req, res) => {
     const playerPk = new PublicKey(player);
     const betTypeNum = betType === "over" ? 1 : 0;
 
-    // Optional DB rules
+    // Rules (optional DB)
     let rtp_bps = 9900;
     let min_bet_lamports = 50000n;
     let max_bet_lamports = 5000000000n;
@@ -640,26 +665,25 @@ app.post("/bets/deposit_prepare", async (req, res) => {
     }
 
     // Nonce/expiry
-    const nonce = randomNonceSafe53(); // <= 2^53-1 so it's safe to use Number(nonce)
+    const nonce = randomNonceSafe53(); // BigInt (<= 2^53-1)
     const expiryUnix = BigInt(
       Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300)
     );
 
     const vaultPda = deriveVaultPda();
-    const pendingBetSeed = Buffer.alloc(8);
-    pendingBetSeed.writeBigUInt64LE(nonce);
+    const pendingBetSeed = Buffer.alloc(8); pendingBetSeed.writeBigUInt64LE(nonce);
     const pendingBetPda = PublicKey.findProgramAddressSync(
       [Buffer.from("bet"), playerPk.toBuffer(), pendingBetSeed],
       PROGRAM_ID
     )[0];
 
-    // Anchor ix data (write u64/i64 in LE)
+    // Anchor ix data
     const data = encodePlaceBetLockArgs({
-      betAmount: betAmt,                 // BigInt ok
+      betAmount: betAmt,
       betType: betTypeNum,
       target: Number(targetNumber),
-      nonce,                             // BigInt
-      expiryUnix,                        // BigInt
+      nonce,
+      expiryUnix,
     });
     const keys = placeBetLockKeys({ player: playerPk, vaultPda, pendingBetPda });
     const programIx = { programId: PROGRAM_ID, keys, data };
@@ -678,27 +702,41 @@ app.post("/bets/deposit_prepare", async (req, res) => {
     const vtx = new VersionedTransaction(msgV0);
     const txBase64 = Buffer.from(vtx.serialize()).toString("base64");
 
-    // Optional persistence (store bigints as strings)
+    // Save context in L1 immediately (so resolve works even if DB fails)
+    const ctx = {
+      player: playerPk.toBase58(),
+      amount: betAmt.toString(),
+      betType: betTypeNum,
+      target: Number(targetNumber),
+      nonce: nonce.toString(),
+      expiry: expiryUnix.toString(),
+    };
+    l1Put(ctx.player, ctx.nonce, { amount: ctx.amount, betType: ctx.betType, target: ctx.target });
+
+    // Persist in DB
+    let savedToDb = false;
+    let dbError = null;
     try {
-      await db.recordBet?.({
-        player: playerPk.toBase58(),
-        amount: betAmt.toString(),
-        betType: betTypeNum,
-        target: Number(targetNumber),
-        roll: 0,
-        payout: "0",
-        nonce: nonce.toString(),
-        expiry: expiryUnix.toString(),
-        signature_base58: "",
-      });
+      if (db.recordBet) {
+        await db.recordBet({
+          ...ctx,
+          roll: 0,
+          payout: "0",
+          signature_base58: "",
+          status: "prepared_lock",
+        });
+        savedToDb = true;
+      }
     } catch (e) {
+      dbError = e?.message || String(e);
       console.error("DB record error:", e);
     }
 
     res.json({
       nonce: nonce.toString(),
-      expiryUnix: Number(expiryUnix), // fine for UI
+      expiryUnix: Number(expiryUnix),
       transactionBase64: txBase64,
+      _debug: process.env.DEBUG_CTX ? { savedToDb, dbError, l1: true } : undefined,
     });
   } catch (e) {
     console.error("deposit_prepare error:", e);
@@ -708,7 +746,6 @@ app.post("/bets/deposit_prepare", async (req, res) => {
 
 /**
  * STEP 2 — resolve (DICE)
- * Returns v0 tx with CU price+limit, ed25519 verify, then resolve_bet.
  */
 app.post("/bets/resolve_prepare", async (req, res) => {
   try {
@@ -719,17 +756,36 @@ app.post("/bets/resolve_prepare", async (req, res) => {
     const playerPk = new PublicKey(player);
     const vaultPda = deriveVaultPda();
     const adminPda = deriveAdminPda();
-
-    // fetch bet context recorded at deposit time (amount/bet_type/target)
     const nonce = BigInt(nonceStr);
-    const lastBet = db.getBetByNonce ? await db.getBetByNonce(nonce.toString()) : null;
+
+    // 1) Try DB first (best source of truth)
+    let lastBet = db.getBetByNonceForPlayer ? await db.getBetByNonceForPlayer(nonce.toString(), playerPk.toBase58()) : null;
+
+    // 2) Fallback to L1 cache if DB missing
+    if (!lastBet) {
+      const cached = l1Get(playerPk.toBase58(), nonce.toString());
+      if (cached) {
+        lastBet = {
+          bet_amount_lamports: cached.amount,
+          bet_type: cached.betType,
+          target: cached.target,
+        };
+      }
+    }
 
     const amountStr = lastBet ? String(lastBet.bet_amount_lamports) : null;
     const betTypeNum = lastBet ? Number(lastBet.bet_type) : null;
     const targetNumber = lastBet ? Number(lastBet.target) : null;
 
     if (amountStr == null || betTypeNum == null || targetNumber == null) {
-      return res.status(400).json({ error: "Backend missing bet context for this nonce" });
+      return res.status(400).json({
+        error: "Backend missing bet context for this nonce",
+        _debug: process.env.DEBUG_CTX ? {
+          db: !!db.enabled,
+          foundInDb: !!(lastBet && lastBet.id),
+          foundInL1: !!l1Get(playerPk.toBase58(), nonce.toString()),
+        } : undefined,
+      });
     }
 
     // Load RTP
@@ -741,7 +797,7 @@ app.post("/bets/resolve_prepare", async (req, res) => {
 
     // RNG + payout
     const roll = roll1to100();
-    const win_odds = betTypeNum === 0 ? targetNumber - 1 : 100 - targetNumber; // under: 1..(t-1); over: (t+1)..100
+    const win_odds = betTypeNum === 0 ? targetNumber - 1 : 100 - targetNumber; // under/over
     if (win_odds < 1 || win_odds > 99) {
       return res.status(400).json({ error: "Invalid win odds based on target" });
     }
@@ -753,19 +809,17 @@ app.post("/bets/resolve_prepare", async (req, res) => {
     const expiryUnixNum =
       Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
 
-    // Canonical message to be verified on-chain via ed25519 pre-instruction.
-    // NOTE: if your buildMessageBytes expects Number for some fields,
-    // they are safe here (<= 2^53-1) due to our limits.
+    // Canonical message
     const msg = buildMessageBytes({
       programId: PROGRAM_ID.toBuffer(),
       vault: vaultPda.toBuffer(),
       player: playerPk.toBuffer(),
-      betAmount: Number(amountBI),      // <= 5e9 fits safely
+      betAmount: Number(amountBI),      // <= 5e9 safe
       betType: betTypeNum,
       target: targetNumber,
       roll,
-      payout: Number(payoutBI),         // safe given our bounds
-      nonce: Number(nonce),             // we generated <= 2^53-1 earlier
+      payout: Number(payoutBI),         // safe given bounds
+      nonce: Number(nonce),             // we generated <= 2^53-1
       expiryUnix: expiryUnixNum,
     });
 
@@ -775,9 +829,8 @@ app.post("/bets/resolve_prepare", async (req, res) => {
     const edIx = buildEd25519VerifyIx({ message: msg, signature, publicKey: ADMIN_PK });
     const edIndex = 2; // CU price=0, CU limit=1, ed25519=2, resolve=3
 
-    // build resolve_bet ix
-    const pendingBetSeed = Buffer.alloc(8);
-    pendingBetSeed.writeBigUInt64LE(nonce);
+    // resolve ix
+    const pendingBetSeed = Buffer.alloc(8); pendingBetSeed.writeBigUInt64LE(nonce);
     const pendingBetPda = PublicKey.findProgramAddressSync(
       [Buffer.from("bet"), playerPk.toBuffer(), pendingBetSeed],
       PROGRAM_ID
@@ -791,7 +844,7 @@ app.post("/bets/resolve_prepare", async (req, res) => {
     const keys = resolveBetKeys({ player: playerPk, vaultPda, adminPda, pendingBetPda });
     const programIx = { programId: PROGRAM_ID, keys, data };
 
-    // CU ixs at the front
+    // CU ixs
     const cuPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
     const cuLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
 
@@ -809,6 +862,7 @@ app.post("/bets/resolve_prepare", async (req, res) => {
     try {
       await db.updateBetPrepared?.({
         nonce: nonce.toString(),
+        player: playerPk.toBase58(),
         roll,
         payout: payoutBI.toString(),
       });
@@ -823,6 +877,7 @@ app.post("/bets/resolve_prepare", async (req, res) => {
       nonce: nonce.toString(),
       expiryUnix: expiryUnixNum,
       transactionBase64: txBase64,
+      _debug: process.env.DEBUG_CTX ? { source: lastBet && lastBet.id ? "db" : "l1" } : undefined,
     });
   } catch (e) {
     console.error("resolve_prepare error:", e);
@@ -844,7 +899,7 @@ const io = new Server(server, {
   },
 });
 
-// Helper: mount WS module defensively (supports both default export or { attachX })
+// Helper: mount WS module defensively
 function mountWs(modulePath, name, attachName, io) {
   try {
     const mod = require(modulePath);
@@ -866,13 +921,11 @@ function mountWs(modulePath, name, attachName, io) {
   }
 }
 
-// Slots WS (uses your dice program rails)
+// Slots WS
 mountWs("./slots_ws", "Slots", "attachSlots", io);
-
-// Crash WS (separate crash program)
+// Crash WS
 mountWs("./crash_ws", "Crash", "attachCrash", io);
-
-// Plinko WS (separate plinko program)
+// Plinko WS
 mountWs("./plinko_ws", "Plinko", "attachPlinko", io);
 
 // Ensure schema then listen
@@ -882,7 +935,7 @@ mountWs("./plinko_ws", "Plinko", "attachPlinko", io);
       await db.ensureSchema();
       console.log("DB schema ensured.");
     } else {
-      console.warn("DB ensureSchema not available (running without DB migrations).");
+      console.warn("DB ensureSchema not available (running without DB).");
     }
   } catch (e) {
     console.warn("Schema ensure failed:", e?.message || e);
@@ -890,7 +943,8 @@ mountWs("./plinko_ws", "Plinko", "attachPlinko", io);
 
   server.listen(PORT, () => {
     console.log(
-      `api up on :${PORT} (cluster=${CLUSTER}, dice_program=${PROGRAM_ID.toBase58()}, crash_program=${CRASH_PROGRAM_ID || "—"}, plinko_program=${PLINKO_PROGRAM_ID || "—"})`
+      `api up on :${PORT} (cluster=${CLUSTER}, dice_program=${PROGRAM_ID.toBase58()}, crash_program=${CRASH_PROGRAM_ID || "—"}, plinko_program=${PLINKO_PROGRAM_ID || "—"}, db=${!!db.enabled})`
     );
   });
 })();
+
