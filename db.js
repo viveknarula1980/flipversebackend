@@ -1,7 +1,19 @@
 // db.js
+// const { Pool } = require("pg");
+
+// const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
 const { Pool } = require("pg");
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false,  // Render’s cert isn’t signed for strict checking
+  },
+});
+
+module.exports = pool;
+
 
 async function ensureSchema() {
   const fs = require("fs");
