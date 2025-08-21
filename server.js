@@ -396,7 +396,7 @@ function mountWs(modulePath, name, attachName, io) {
 }
 
 // Slots WS (uses your dice program rails)
-mountWs("./slots_ws", "Slots", "attachSlots", io);
+// mountWs("./slots_ws", "Slots", "attachSlots", io);
 
 // Crash WS (separate crash program)
 // mountWs("./crash_ws", "Crash", "attachCrash", io);
