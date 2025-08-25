@@ -40,7 +40,7 @@ function anchorDisc(name) { return crypto.createHash("sha256").update(`global:${
 if (!process.env.MINES_PROGRAM_ID) {
   throw new Error("MINES_PROGRAM_ID missing in .env");
 }
-const PROGRAM_ID = new PublicKey(process.env.MINES_PROGRAM_ID);
+// const PROGRAM_ID = new PublicKey(process.env.MINES_PROGRAM_ID);
 
 const SYSVAR_INSTR = new PublicKey(
   "Sysvar1nstructions1111111111111111111111111"
