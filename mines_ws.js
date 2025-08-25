@@ -1,11 +1,8 @@
 // backend/mines_ws.js
-<<<<<<< HEAD
 // Server-driven Mines. Server pays winners, then resolve(payout=0) to close PDA.
-=======
 // Server-driven Mines (no auto-open). User signs LOCK; every click sends `mines:open`.
 // Resolve is server-paid (no 2nd wallet popup). Server will transfer payout directly
 // from its fee payer wallet, then call resolve(payout=0) to close the pending PDA.
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 
 const crypto = require("crypto");
 const {
@@ -19,16 +16,12 @@ const {
 } = require("@solana/web3.js");
 
 const { ADMIN_PK, signMessageEd25519, getServerKeypair } = require("./signer");
-<<<<<<< HEAD
 const DB = global.db || require("./db");
-=======
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 
 // ---- ENV / RPC / Program ----
 const RPC_URL = process.env.CLUSTER || "https://api.devnet.solana.com";
 const connection = new Connection(RPC_URL, "confirmed");
 
-<<<<<<< HEAD
 if (!process.env.MINES_PROGRAM_ID) throw new Error("MINES_PROGRAM_ID missing in .env");
 const PROGRAM_ID = new PublicKey(process.env.MINES_PROGRAM_ID);
 
@@ -44,7 +37,6 @@ function pdaPending(playerPk, nonce) {
   return PublicKey.findProgramAddressSync([Buffer.from("round"), playerPk.toBuffer(), nb], PROGRAM_ID)[0];
 }
 function anchorDisc(name) { return crypto.createHash("sha256").update(`global:${name}`).digest().slice(0, 8); }
-=======
 if (!process.env.MINES_PROGRAM_ID) {
   throw new Error("MINES_PROGRAM_ID missing in .env");
 }
@@ -83,38 +75,29 @@ function anchorDisc(name) {
 
 // ---- arg encoders matching lib.rs ----
 // lock(bet_lamports:u64, rows:u8, cols:u8, mines:u8, nonce:u64, expiry:i64)
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 function encLock({ betLamports, rows, cols, mines, nonce, expiryUnix }) {
   const d = anchorDisc("lock");
   const b = Buffer.alloc(8 + 8 + 1 + 1 + 1 + 8 + 8);
   let o = 0;
   d.copy(b, o); o += 8;
   b.writeBigUInt64LE(BigInt(betLamports), o); o += 8;
-<<<<<<< HEAD
   b.writeUInt8(rows & 0xff, o++); b.writeUInt8(cols & 0xff, o++); b.writeUInt8(mines & 0xff, o++);
-=======
   b.writeUInt8(rows & 0xff, o++);
   b.writeUInt8(cols & 0xff, o++);
   b.writeUInt8(mines & 0xff, o++);
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   b.writeBigUInt64LE(BigInt(nonce), o); o += 8;
   b.writeBigInt64LE(BigInt(expiryUnix), o); o += 8;
   return b;
 }
-<<<<<<< HEAD
-=======
 // resolve(checksum:u8, payout:u64, ed_index:u8)
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 function encResolve({ checksum, payout, edIndex }) {
   const d = anchorDisc("resolve");
   const b = Buffer.alloc(8 + 1 + 8 + 1);
   let o = 0;
   d.copy(b, o); o += 8;
-<<<<<<< HEAD
   b.writeUInt8(checksum & 0xff, o++); b.writeBigUInt64LE(BigInt(payout), o); o += 8; b.writeUInt8(edIndex & 0xff, o++);
   return b;
 }
-=======
   b.writeUInt8(checksum & 0xff, o++);
   b.writeBigUInt64LE(BigInt(payout), o); o += 8;
   b.writeUInt8(edIndex & 0xff, o++);
@@ -122,7 +105,6 @@ function encResolve({ checksum, payout, edIndex }) {
 }
 
 // Accounts (must match #[derive(Accounts)] in lib.rs)
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 function keysLock({ player, vault, pending }) {
   return [
     { pubkey: player, isSigner: true, isWritable: true },
@@ -132,13 +114,11 @@ function keysLock({ player, vault, pending }) {
   ];
 }
 function keysResolve({ player, vault, admin, pending }) {
-<<<<<<< HEAD
   return [
     { pubkey: player, isSigner: false, isWritable: true },
     { pubkey: vault, isSigner: false, isWritable: true },
     { pubkey: admin, isSigner: false, isWritable: false },
     { pubkey: pending, isSigner: false, isWritable: true },
-=======
   // Order must match your Resolve<'info> layout in lib.rs:
   // player, vault, admin, pending, system_program, instructions
   return [
@@ -146,17 +126,13 @@ function keysResolve({ player, vault, admin, pending }) {
     { pubkey: vault, isSigner: false, isWritable: true },    // vault PDA (signer by seeds)
     { pubkey: admin, isSigner: false, isWritable: false },   // admin filler
     { pubkey: pending, isSigner: false, isWritable: true },  // pending PDA (close = player)
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     { pubkey: SYSVAR_INSTR, isSigner: false, isWritable: false },
   ];
 }
 
-<<<<<<< HEAD
 // math
-=======
 // Simple binomial multiplier (gross) with optional RTP
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 function multiplierFor(safeOpened, totalTiles, mines, rtpBps = 10000) {
   if (safeOpened <= 0) return 1;
   let m = 1;
@@ -169,10 +145,7 @@ function multiplierFor(safeOpened, totalTiles, mines, rtpBps = 10000) {
   return Math.max(1, m);
 }
 
-<<<<<<< HEAD
-=======
 // Deterministic bombs set (first click safe)
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 function deriveBombs({ rows, cols, mines, playerPk, nonce, firstSafeIndex }) {
   const total = rows * cols;
   const seedKey = crypto.createHash("sha256")
@@ -182,13 +155,10 @@ function deriveBombs({ rows, cols, mines, playerPk, nonce, firstSafeIndex }) {
   const picked = new Set();
   let i = 0;
   while (picked.size < mines) {
-<<<<<<< HEAD
     const rng = crypto.createHmac("sha256", seedKey).update(Buffer.from(String(i++))).digest();
-=======
     const rng = crypto.createHmac("sha256", seedKey)
       .update(Buffer.from(String(i++)))
       .digest();
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
     const n = ((rng[0] << 24) | (rng[1] << 16) | (rng[2] << 8) | rng[3]) >>> 0;
     const idx = n % total;
     if (idx === firstSafeIndex) continue;
@@ -197,22 +167,17 @@ function deriveBombs({ rows, cols, mines, playerPk, nonce, firstSafeIndex }) {
   return picked;
 }
 
-<<<<<<< HEAD
 // store
-=======
 // rounds store
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 const rounds = new Map();
 
 async function buildLockTx({ playerPk, betLamports, rows, cols, mines, nonce, expiryUnix }) {
   const vault = pdaVault();
   const pending = pdaPending(playerPk, nonce);
-<<<<<<< HEAD
   const ix = { programId: PROGRAM_ID, keys: keysLock({ player: playerPk, vault, pending }), data: encLock({ betLamports, rows, cols, mines, nonce, expiryUnix }) };
   const cu = ComputeBudgetProgram.setComputeUnitLimit({ units: 300_000 });
   const { blockhash } = await connection.getLatestBlockhash("confirmed");
   const msg = new TransactionMessage({ payerKey: playerPk, recentBlockhash: blockhash, instructions: [cu, ix] }).compileToV0Message();
-=======
   const ix = {
     programId: PROGRAM_ID,
     keys: keysLock({ player: playerPk, vault, pending }),
@@ -225,7 +190,6 @@ async function buildLockTx({ playerPk, betLamports, rows, cols, mines, nonce, ex
     recentBlockhash: blockhash,
     instructions: [cu, ix],
   }).compileToV0Message();
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   const vtx = new VersionedTransaction(msg);
 
   const sim = await connection.simulateTransaction(vtx, { sigVerify: false });
@@ -240,7 +204,6 @@ async function buildLockTx({ playerPk, betLamports, rows, cols, mines, nonce, ex
   return Buffer.from(vtx.serialize()).toString("base64");
 }
 
-<<<<<<< HEAD
 async function sendResolve({ playerPk, nonce, payoutLamports }) {
   const vault = pdaVault();
   const pending = pdaPending(playerPk, nonce);
@@ -252,7 +215,6 @@ async function sendResolve({ playerPk, nonce, payoutLamports }) {
       const transferIx = SystemProgram.transfer({ fromPubkey: feePayer.publicKey, toPubkey: playerPk, lamports: BigInt(payoutLamports) });
       const { blockhash: bh1 } = await connection.getLatestBlockhash("confirmed");
       const transferMsg = new TransactionMessage({ payerKey: feePayer.publicKey, recentBlockhash: bh1, instructions: [transferIx] }).compileToV0Message();
-=======
 /**
  * sendResolve:
  * - If payoutLamports > 0: server (fee payer) transfers lamports to player in a separate tx.
@@ -283,23 +245,18 @@ async function sendResolve({ playerPk, nonce, payoutLamports }) {
         recentBlockhash: bh1,
         instructions: [transferIx],
       }).compileToV0Message();
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
       const transferVtx = new VersionedTransaction(transferMsg);
       transferVtx.sign([feePayer]);
       const transferSig = await connection.sendRawTransaction(transferVtx.serialize(), { skipPreflight: false });
       await connection.confirmTransaction(transferSig, "confirmed");
-<<<<<<< HEAD
     } catch (e) {
-=======
       // After server-paid transfer succeeded, we will call resolve with payout=0 so program does not try to transfer from vault.
     } catch (e) {
       // If server-side transfer failed, abort and bubble error
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
       throw new Error("Server payout transfer failed: " + (e?.message || String(e)));
     }
   }
 
-<<<<<<< HEAD
   const msg = Buffer.concat([ Buffer.from("MINES_V1"), PROGRAM_ID.toBuffer(), vault.toBuffer(), playerPk.toBuffer(), Buffer.from(String(nonce)) ]);
   const edSig = await signMessageEd25519(msg);
   const edIx = Ed25519Program.createInstructionWithPublicKey({ publicKey: admin.toBuffer(), message: msg, signature: edSig });
@@ -314,7 +271,6 @@ async function sendResolve({ playerPk, nonce, payoutLamports }) {
   const msgV0 = new TransactionMessage({ payerKey: feePayer.publicKey, recentBlockhash: blockhash, instructions: [cu, edIx, ix] }).compileToV0Message();
   const vtx = new VersionedTransaction(msgV0);
 
-=======
   // optional proof message (kept for off-chain proof)
   const msg = Buffer.concat([
     Buffer.from("MINES_V1"),
@@ -359,16 +315,13 @@ async function sendResolve({ playerPk, nonce, payoutLamports }) {
   const vtx = new VersionedTransaction(msgV0);
 
   // simulate (no sigs attached yet)
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   const sim = await connection.simulateTransaction(vtx, { sigVerify: false });
   if (sim.value.err) {
     const logs = (sim.value.logs || []).join("\n");
     throw new Error(`RESOLVE simulate failed: ${JSON.stringify(sim.value.err)}\n${logs}`);
   }
-<<<<<<< HEAD
   vtx.sign([feePayer]);
   const sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
-=======
 
   // sign and send resolve (feePayer pays fees)
   vtx.sign([feePayer]);
@@ -376,7 +329,6 @@ async function sendResolve({ playerPk, nonce, payoutLamports }) {
     skipPreflight: false,
     maxRetries: 5,
   });
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   await connection.confirmTransaction(sig, "confirmed");
   return sig;
 }
@@ -388,16 +340,12 @@ function attachMines(io) {
   io.on("connection", (socket) => {
     socket.on("register", ({ player }) => { socket.data.player = String(player || "guest"); });
 
-<<<<<<< HEAD
-=======
     // prepare lock
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
     socket.on("mines:prepare_lock", async (p) => {
       try {
         const player = String(p?.player || "");
         if (!player) return socket.emit("mines:error", { code: "NO_PLAYER", message: "player required" });
 
-<<<<<<< HEAD
         // admin gate + min/max
         const cfg = await DB.getGameConfig?.("mines");
         if (cfg && (!cfg.enabled || !cfg.running)) {
@@ -411,10 +359,8 @@ function attachMines(io) {
         if (betLamports < min || betLamports > max) {
           return socket.emit("mines:error", { code: "BET_RANGE", message: "Bet outside allowed range" });
         }
-=======
         const betLamports = BigInt(p?.betAmountLamports || 0);
         if (!(betLamports > 0n)) return socket.emit("mines:error", { code:"BAD_BET", message:"betAmountLamports must be > 0" });
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 
         const rows = clamp(i32(p?.rows), 2, 8);
         const cols = clamp(i32(p?.cols), 2, 8);
@@ -424,14 +370,12 @@ function attachMines(io) {
         const nonce = Date.now();
         const expiryUnix = Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
 
-<<<<<<< HEAD
         const txB64 = await buildLockTx({ playerPk, betLamports: Number(betLamports), rows, cols, mines, nonce, expiryUnix });
 
         let rtp_bps = cfg?.rtp_bps ?? 9800;
         rounds.set(nonce, { playerPk, betLamports: BigInt(betLamports), rows, cols, mines, opened: new Set(), bombs: null, rtpBps: rtp_bps, over: false });
 
         socket.emit("mines:lock_tx", { nonce: String(nonce), expiryUnix, transactionBase64: txB64 });
-=======
         const txB64 = await buildLockTx({
           playerPk, betLamports: Number(betLamports), rows, cols, mines, nonce, expiryUnix
         });
@@ -459,21 +403,18 @@ function attachMines(io) {
           expiryUnix,
           transactionBase64: txB64,
         });
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
       } catch (e) {
         console.error("mines:prepare_lock error:", e);
         socket.emit("mines:error", { code: "PREPARE_FAIL", message: e.message || String(e) });
       }
     });
 
-<<<<<<< HEAD
     socket.on("mines:lock_confirmed", ({ nonce }) => {
       const ctx = rounds.get(Number(nonce));
       if (!ctx) return socket.emit("mines:error", { code: "NOT_FOUND", message: "no round" });
       socket.emit("mines:started", { nonce: String(nonce), rows: ctx.rows, cols: ctx.cols, mines: ctx.mines });
     });
 
-=======
     // lock confirmed
     socket.on("mines:lock_confirmed", ({ nonce }) => {
       const ctx = rounds.get(Number(nonce));
@@ -487,7 +428,6 @@ function attachMines(io) {
     });
 
     // open
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
     socket.on("mines:open", async ({ nonce, row, col }) => {
       try {
         const ctx = rounds.get(Number(nonce));
@@ -502,9 +442,7 @@ function attachMines(io) {
         if (ctx.opened.has(idx)) return;
 
         if (!ctx.bombs) {
-<<<<<<< HEAD
           ctx.bombs = deriveBombs({ rows: ctx.rows, cols: ctx.cols, mines: ctx.mines, playerPk: ctx.playerPk, nonce: Number(nonce), firstSafeIndex: idx });
-=======
           ctx.bombs = deriveBombs({
             rows: ctx.rows,
             cols: ctx.cols,
@@ -513,13 +451,11 @@ function attachMines(io) {
             nonce: Number(nonce),
             firstSafeIndex: idx,
           });
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
         }
 
         if (ctx.bombs.has(idx)) {
           ctx.over = true;
           socket.emit("mines:boom", { nonce: String(nonce), atIndex: idx, atStep: ctx.opened.size });
-<<<<<<< HEAD
           const sig = await sendResolve({ playerPk: ctx.playerPk, nonce: Number(nonce), payoutLamports: 0n });
 
           // persist loss
@@ -536,7 +472,6 @@ function attachMines(io) {
 
           const payload = { nonce: String(nonce), payoutLamports: 0, safeSteps: ctx.opened.size, tx: sig };
           io.emit("mines:resolved", payload);
-=======
           const sig = await sendResolve({
             playerPk: ctx.playerPk,
             nonce: Number(nonce),
@@ -548,7 +483,6 @@ function attachMines(io) {
             safeSteps: ctx.opened.size,
             tx: sig,
           });
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
           rounds.delete(Number(nonce));
           return;
         }
@@ -556,26 +490,20 @@ function attachMines(io) {
         ctx.opened.add(idx);
         const totalTiles = ctx.rows * ctx.cols;
         const mult = multiplierFor(ctx.opened.size, totalTiles, ctx.mines, ctx.rtpBps);
-<<<<<<< HEAD
         socket.emit("mines:safe", { nonce: String(nonce), index: idx, safeCount: ctx.opened.size, multiplier: mult });
-=======
         socket.emit("mines:safe", {
           nonce: String(nonce),
           index: idx,
           safeCount: ctx.opened.size,
           multiplier: mult,
         });
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
       } catch (e) {
         console.error("mines:open error:", e);
         socket.emit("mines:error", { code: "OPEN_FAIL", message: e.message || String(e) });
       }
     });
 
-<<<<<<< HEAD
-=======
     // cashout
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
     socket.on("mines:cashout", async ({ nonce }) => {
       try {
         const ctx = rounds.get(Number(nonce));
@@ -590,7 +518,6 @@ function attachMines(io) {
         const payout = (ctx.betLamports * BigInt(Math.floor(mult * 10000))) / 10000n;
 
         ctx.over = true;
-<<<<<<< HEAD
         const sig = await sendResolve({ playerPk: ctx.playerPk, nonce: Number(nonce), payoutLamports: payout });
 
         // persist win + activity
@@ -611,7 +538,6 @@ function attachMines(io) {
         } catch {}
 
         io.emit("mines:resolved", { nonce: String(nonce), payoutLamports: Number(payout), safeSteps: ctx.opened.size, tx: sig });
-=======
         const sig = await sendResolve({
           playerPk: ctx.playerPk,
           nonce: Number(nonce),
@@ -625,7 +551,6 @@ function attachMines(io) {
           tx: sig,
         });
 
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
         rounds.delete(Number(nonce));
       } catch (e) {
         console.error("mines:cashout error:", e);
