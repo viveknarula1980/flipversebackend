@@ -1,6 +1,5 @@
-<<<<<<< HEAD
 // backend/slots_ws.js — DB gating + optional unified stats writing
-=======
+
 // // slots_ws.js — RTP 85%, near-miss, fee, controlled jackpot, deterministic outcomes
 // const crypto = require("crypto");
 // const fs = require("fs");
@@ -510,7 +509,6 @@
 
 
 // slots_ws.js — 3×3 grid, RTP 85%, near-miss, fee, controlled jackpot, deterministic outcomes
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 
 const crypto = require("crypto");
 const fs = require("fs");
@@ -549,9 +547,8 @@ function makeRng({ serverSeed, clientSeed, nonce }) {
       .createHmac("sha256", serverSeed)
       .update(String(clientSeed || ""))
       .update(Buffer.from(String(nonce)))
-<<<<<<< HEAD
       .update(Buffer.from([counter & 0xff,(counter>>8)&0xff,(counter>>16)&0xff,(counter>>24)&0xff]))
-=======
+
       .update(
         Buffer.from([
           counter & 0xff,
@@ -560,7 +557,6 @@ function makeRng({ serverSeed, clientSeed, nonce }) {
           (counter >> 24) & 0xff,
         ])
       )
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
       .digest();
     counter++; pool = Buffer.concat([pool, h]);
   }
@@ -574,12 +570,11 @@ function encodePlaceBetLockArgs({ betAmount, betType, target, nonce, expiryUnix 
   const disc = anchorDisc("place_bet_lock");
   const buf = Buffer.alloc(8 + 8 + 1 + 1 + 8 + 8);
   let o = 0;
-<<<<<<< HEAD
   disc.copy(buf, o); o += 8;
   buf.writeBigUInt64LE(BigInt(betAmount), o); o += 8;
   buf.writeUInt8(betType & 0xff, o++); buf.writeUInt8(target & 0xff, o++); buf.writeBigUInt64LE(BigInt(nonce), o); o += 8;
   buf.writeBigInt64LE(BigInt(expiryUnix), o); o += 8;
-=======
+
   disc.copy(buf, o);
   o += 8;
   buf.writeBigUInt64LE(BigInt(betAmount), o);
@@ -590,24 +585,21 @@ function encodePlaceBetLockArgs({ betAmount, betType, target, nonce, expiryUnix 
   o += 8;
   buf.writeBigInt64LE(BigInt(expiryUnix), o);
   o += 8;
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   return buf;
 }
 function encodeResolveBetArgs({ roll, payout, ed25519InstrIndex }) {
   const disc = anchorDisc("resolve_bet");
   const buf = Buffer.alloc(8 + 1 + 8 + 1);
   let o = 0;
-<<<<<<< HEAD
   disc.copy(buf, o); o += 8;
   buf.writeUInt8(roll & 0xff, o++); buf.writeBigUInt64LE(BigInt(payout), o); o += 8; buf.writeUInt8(ed25519InstrIndex & 0xff, o++);
-=======
+
   disc.copy(buf, o);
   o += 8;
   buf.writeUInt8(roll & 0xff, o++); // 1 for win, 100 for loss
   buf.writeBigUInt64LE(BigInt(payout), o);
   o += 8; // lamports
   buf.writeUInt8(ed25519InstrIndex & 0xff, o++);
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   return buf;
 }
 function placeBetLockKeys({ player, vaultPda, pendingBetPda }) {
@@ -619,14 +611,13 @@ function placeBetLockKeys({ player, vaultPda, pendingBetPda }) {
   ];
 }
 
-<<<<<<< HEAD
 // ---------- Game constants ----------
 const SLOT_SYMBOLS = ["floki", "wif", "brett", "shiba", "bonk", "doge", "pepe", "sol", "zoggy"];
 const SLOTS_CELLS = 9;
 
 const PAYTABLE = [
   { key: "near_miss", type: "near", payoutMul: 0.8, freq: 0.24999992500002252 },
-=======
+
 // ---------- Game constants (3×3) ----------
 // Use UI slugs, not emojis. Keep EXACT order that the frontend expects.
 const SLOT_SYMBOLS = ["floki", "wif", "brett", "shiba", "bonk", "doge", "pepe", "sol", "zoggy"];
@@ -639,7 +630,6 @@ const PAYTABLE = [
   { key: "near_miss", type: "near", payoutMul: 0.8, freq: 0.24999992500002252 },
 
   // Triples by symbol (3-in-a-row in the mid row)
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   { key: "triple_floki", type: "triple", symbol: "floki", payoutMul: 1.5, freq: 0.04999998500000451 },
   { key: "triple_wif", type: "triple", symbol: "wif", payoutMul: 1.5, freq: 0.04999998500000451 },
   { key: "triple_brett", type: "triple", symbol: "brett", payoutMul: 1.5, freq: 0.04999998500000451 },
@@ -649,7 +639,6 @@ const PAYTABLE = [
   { key: "triple_pepe", type: "triple", symbol: "pepe", payoutMul: 20, freq: 0.003541998937400319 },
   { key: "triple_sol", type: "triple", symbol: "sol", payoutMul: 50, freq: 0.001416999574900128 },
   { key: "triple_zoggy", type: "triple", symbol: "zoggy", payoutMul: 100, freq: 0.000708299787510064 },
-<<<<<<< HEAD
   { key: "jackpot", type: "triple", symbol: "zoggy", payoutMul: 1000, freq: 0 },
   { key: "loss", type: "loss", payoutMul: 0, freq: 0.5518348344495496 },
 ];
@@ -690,7 +679,7 @@ function buildGridForOutcome({ rng, outcome }) {
   }
   for (let i = 0; i < 3; i++) grid[midStart + i] = mid[i];
   return grid;
-=======
+
 
   // Controlled-only jackpot (force via env nonces)
   { key: "jackpot", type: "triple", symbol: "zoggy", payoutMul: 1000, freq: 0 },
@@ -779,7 +768,6 @@ function buildGridForOutcome({ rng, outcome }) {
   // write middle row back
   for (let i = 0; i < 3; i++) grid[midStart + i] = mid[i];
   return grid; // length === 9
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 }
 function computePayoutLamports(betLamports, payoutMul, feePct) {
   const SCALE = 1_000_000n;
@@ -794,7 +782,6 @@ function computePayoutLamports(betLamports, payoutMul, feePct) {
 function computeSpin({ serverSeed, clientSeed, nonce, betLamports, feePct }) {
   const rng = makeRng({ serverSeed, clientSeed, nonce });
   const outcome = pickOutcome(rng, nonce);
-<<<<<<< HEAD
   const grid = buildGridForOutcome({ rng, outcome });
   const payoutLamports = computePayoutLamports(betLamports, outcome.payoutMul, feePct);
   return { outcome, grid, payoutLamports };
@@ -803,7 +790,7 @@ function computeSpin({ serverSeed, clientSeed, nonce, betLamports, feePct }) {
 // ---------- State ----------
 const slotsPending = new Map();
 const FIXED_BET_TYPE = 0;
-=======
+
   const grid = buildGridForOutcome({ rng, outcome }); // 9 symbols
   const payoutLamports = computePayoutLamports(betLamports, outcome.payoutMul);
   return { outcome, grid, payoutLamports };
@@ -831,7 +818,6 @@ global.feePayer = loadFeePayer();
 // ---------- State ----------
 const slotsPending = new Map(); // nonce -> ctx (if no DB present)
 const FIXED_BET_TYPE = 0; // you already wired these in your program
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 const FIXED_TARGET = 50;
 
 // ---------- WS ----------
@@ -853,17 +839,15 @@ function attachSlots(io) {
         const max = BigInt(cfg?.max_bet_lamports ?? 5_000_000_000n);
 
         const betLamports = BigInt(betAmountLamports || 0);
-<<<<<<< HEAD
         if (betLamports <= 0n) return socket.emit("slots:error", { code: "BAD_BET", message: "betAmountLamports invalid" });
         if (betLamports < min || betLamports > max) {
           return socket.emit("slots:error", { code: "BET_RANGE", message: "Bet outside allowed range" });
-=======
+
         if (betLamports <= 0n) {
           return socket.emit("slots:error", {
             code: "BAD_BET",
             message: "betAmountLamports invalid",
           });
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
         }
 
         const playerPk = new PublicKey(player);
@@ -899,12 +883,11 @@ function attachSlots(io) {
             await DB.pool.query(
               `insert into slots_spins(player, bet_amount, client_seed, server_seed_hash, server_seed, nonce, status, fee_pct)
                values ($1,$2,$3,$4,$5,$6,'prepared',$7)`,
-<<<<<<< HEAD
               [player, betLamports.toString(), String(clientSeed || ""), serverSeedHash, serverSeed.toString("hex"), BigInt(nonce), feePct]
             );
           } else {
             slotsPending.set(nonce, { player, betLamports, clientSeed: String(clientSeed || ""), serverSeed, serverSeedHash, expiryUnix, pendingBetPda: pendingBetPda.toBase58(), betType: FIXED_BET_TYPE, target: FIXED_TARGET, feePct });
-=======
+
               [
                 player,
                 betLamports.toString(),
@@ -927,7 +910,6 @@ function attachSlots(io) {
               betType: FIXED_BET_TYPE,
               target: FIXED_TARGET,
             });
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
           }
         } catch (e) {
           // If your table doesn't have fee_pct column yet, this will log and continue gracefully.
@@ -950,15 +932,13 @@ function attachSlots(io) {
 
     socket.on("slots:prepare_resolve", async ({ player, nonce }) => {
       try {
-<<<<<<< HEAD
         if (!player) return socket.emit("slots:error", { code: "NO_PLAYER", message: "player required" });
         if (!nonce) return socket.emit("slots:error", { code: "NO_NONCE", message: "nonce required" });
-=======
+
         if (!player)
           return socket.emit("slots:error", { code: "NO_PLAYER", message: "player required" });
         if (!nonce)
           return socket.emit("slots:error", { code: "NO_NONCE", message: "nonce required" });
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 
         const playerPk = new PublicKey(player);
 
@@ -976,10 +956,8 @@ function attachSlots(io) {
               expiryUnix: 0,
               betType: FIXED_BET_TYPE,
               target: FIXED_TARGET,
-<<<<<<< HEAD
               feePct: Number(row.fee_pct || 0),
-=======
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
+
             };
           }
         }
@@ -991,17 +969,15 @@ function attachSlots(io) {
         }
 
         const vaultPda = deriveVaultPda();
-<<<<<<< HEAD
         const pendingBetSeed = Buffer.alloc(8); pendingBetSeed.writeBigUInt64LE(BigInt(nonce));
         const pendingBetPda = PublicKey.findProgramAddressSync([Buffer.from("bet"), playerPk.toBuffer(), pendingBetSeed], PROGRAM_ID)[0];
-=======
+
         const pendingBetSeed = Buffer.alloc(8);
         pendingBetSeed.writeBigUInt64LE(BigInt(nonce));
         const pendingBetPda = PublicKey.findProgramAddressSync(
           [Buffer.from("bet"), playerPk.toBuffer(), pendingBetSeed],
           PROGRAM_ID
         )[0];
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 
         const { outcome, grid, payoutLamports } = computeSpin({
           serverSeed: ctx.serverSeed,
@@ -1020,13 +996,11 @@ function attachSlots(io) {
           vault: vaultPda.toBuffer(),
           player: playerPk.toBuffer(),
           betAmount: Number(ctx.betLamports),
-<<<<<<< HEAD
           betType: ctx.betType,
           target: ctx.target,
-=======
+
           betType: ctx.betType, // 0
           target: ctx.target, // 50
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
           roll,
           payout: Number(payoutLamports),
           nonce: Number(nonce),
