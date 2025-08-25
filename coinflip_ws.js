@@ -1,5 +1,11 @@
 // backend/coinflip_ws.js
+<<<<<<< HEAD
 // Server-authoritative 2-player coinflip. Sends outcome in "coinflip:starting" so UI anim is not random.
+=======
+// 2-player coinflip with server-paid resolve (single wallet popup per human).
+// Matches by stake. Prefers opposite sides; if both humans pick the SAME side,
+// we still match them and pick a winner by RNG. If no opponent in 10s, a bot joins.
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 
 const crypto = require("crypto");
 const {
@@ -14,9 +20,12 @@ const {
 const { ADMIN_PK, signMessageEd25519, getServerKeypair } = require("./signer");
 const sol = require("./solana");
 
+<<<<<<< HEAD
 // DB helpers
 const DB = global.db || require("./db");
 
+=======
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 // ----- ENV / Program IDs -----
 const RPC_URL = process.env.CLUSTER || "https://api.devnet.solana.com";
 const COINFLIP_PROGRAM_ID = new PublicKey(
@@ -29,6 +38,7 @@ const COINFLIP_PROGRAM_ID = new PublicKey(
 
 const LOCK_IX = process.env.COINFLIP_LOCK_IX_NAME || "lock";
 const RES_IX  = process.env.COINFLIP_RESOLVE_IX_NAME || "resolve";
+<<<<<<< HEAD
 const DEFAULT_FEE_BPS = Number(process.env.COINFLIP_FEE_BPS || 600);
 const QUEUE_TTL_MS = Number(process.env.COINFLIP_QUEUE_TTL_MS || 10000);
 const PENDING_SEED = String(process.env.COINFLIP_PENDING_SEED || "match");
@@ -36,6 +46,25 @@ const connection = sol?.connection instanceof Connection ? sol.connection : new 
 const buildEd25519VerifyIx = sol.buildEd25519VerifyIx;
 
 // ----- PDAs -----
+=======
+const FEE_BPS = Number(process.env.COINFLIP_FEE_BPS || 600);           // 6%
+const QUEUE_TTL_MS = Number(process.env.COINFLIP_QUEUE_TTL_MS || 10000);
+const PENDING_SEED = String(process.env.COINFLIP_PENDING_SEED || "match");
+
+// Common sysvars
+const SYSVAR_INSTR = new PublicKey("Sysvar1nstructions1111111111111111111111111");
+const SYSVAR_CLOCK = new PublicKey("SysvarC1ock11111111111111111111111111111111");
+const SYSVAR_RENT  = new PublicKey("SysvarRent111111111111111111111111111111111");
+
+// Connection (reuse shared if available)
+const connection = sol?.connection instanceof Connection
+  ? sol.connection
+  : new Connection(RPC_URL, "confirmed");
+
+const buildEd25519VerifyIx = sol.buildEd25519VerifyIx;
+
+// ----- PDA helpers -----
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 function deriveVaultPda() {
   return PublicKey.findProgramAddressSync([Buffer.from("vault")], COINFLIP_PROGRAM_ID)[0];
 }
@@ -50,25 +79,45 @@ function derivePendingPda(player, nonce) {
   )[0];
 }
 
+<<<<<<< HEAD
 // ----- discriminators & encoders -----
 const disc = (name) => crypto.createHash("sha256").update(`global:${name}`).digest().slice(0, 8);
 
+=======
+// ----- Anchor discriminators & arg encoders -----
+const disc = (name) =>
+  crypto.createHash("sha256").update(`global:${name}`).digest().slice(0, 8);
+
+// LockArgs (example): [u64 entry_lamports][u8 side][u64 nonce][i64 expiry]
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 function encLockArgs({ entryLamports, side, nonce, expiryUnix }) {
   const d = disc(LOCK_IX);
   const b = Buffer.alloc(8 + 8 + 1 + 8 + 8);
   let o = 0;
   d.copy(b, o); o += 8;
+<<<<<<< HEAD
   b.writeBigUInt64LE(BigInt(entryLamports), o); o += 8;
   b.writeUInt8((side ?? 0) & 0xff, o++);
   b.writeBigUInt64LE(BigInt(nonce), o); o += 8;
   b.writeBigInt64LE(BigInt(expiryUnix), o); o += 8;
   return b;
 }
+=======
+  b.writeBigUInt64LE(BigInt(entryLamports), o); o += 8;  // entry
+  b.writeUInt8((side ?? 0) & 0xff, o++);                 // 0=heads,1=tails
+  b.writeBigUInt64LE(BigInt(nonce), o); o += 8;          // nonce
+  b.writeBigInt64LE(BigInt(expiryUnix), o); o += 8;      // expiry
+  return b;
+}
+
+// ResolveArgs: [u8 checksum][u64 payout][u8 ed_index][u8 winner_side]
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 function encResolveArgs({ checksum, payout, edIndex, winnerSide }) {
   const d = disc(RES_IX);
   const b = Buffer.alloc(8 + 1 + 8 + 1 + 1);
   let o = 0;
   d.copy(b, o); o += 8;
+<<<<<<< HEAD
   b.writeUInt8(checksum & 0xff, o++);
   b.writeBigUInt64LE(BigInt(payout), o); o += 8;
   b.writeUInt8(edIndex & 0xff, o++);
@@ -80,6 +129,16 @@ const SYSVAR_INSTR = new PublicKey("Sysvar1nstructions1111111111111111111111111"
 const SYSVAR_CLOCK = new PublicKey("SysvarC1ock11111111111111111111111111111111");
 const SYSVAR_RENT  = new PublicKey("SysvarRent111111111111111111111111111111111");
 
+=======
+  b.writeUInt8(checksum & 0xff, o++);                    // checksum
+  b.writeBigUInt64LE(BigInt(payout), o); o += 8;         // payout
+  b.writeUInt8(edIndex & 0xff, o++);                     // ed idx
+  b.writeUInt8((winnerSide ?? 0) & 0xff, o++);           // 0=heads 1=tails
+  return b;
+}
+
+// Account metas — a few variants to match different programs.
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 function makeResolveLayouts({ player, vault, adminPda, adminAuth, pending }) {
   const base = [
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
@@ -88,12 +147,20 @@ function makeResolveLayouts({ player, vault, adminPda, adminAuth, pending }) {
     { pubkey: SYSVAR_RENT,             isSigner: false, isWritable: false },
   ];
   return [
+<<<<<<< HEAD
+=======
+    // 0) [player, vault, pending, sysvars]  <-- NO admin PDA at all
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
     [
       { pubkey: player,  isSigner: false, isWritable: true },
       { pubkey: vault,   isSigner: false, isWritable: true },
       { pubkey: pending, isSigner: false, isWritable: true },
       ...base,
     ],
+<<<<<<< HEAD
+=======
+    // 1) [player, vault, admin_pda, pending, sysvars]
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
     [
       { pubkey: player,  isSigner: false, isWritable: true },
       { pubkey: vault,   isSigner: false, isWritable: true },
@@ -101,18 +168,33 @@ function makeResolveLayouts({ player, vault, adminPda, adminAuth, pending }) {
       { pubkey: pending, isSigner: false, isWritable: true },
       ...base,
     ],
+<<<<<<< HEAD
+=======
+    // 2) [player, vault, admin_pda, admin_auth, pending, sysvars]
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
     [
       { pubkey: player,  isSigner: false, isWritable: true },
       { pubkey: vault,   isSigner: false, isWritable: true },
       { pubkey: adminPda,isSigner: false, isWritable: false },
+<<<<<<< HEAD
       { pubkey: new PublicKey(adminAuth), isSigner:false, isWritable: false },
+=======
+      { pubkey: adminAuth,isSigner:false, isWritable: false },
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
       { pubkey: pending, isSigner: false, isWritable: true },
       ...base,
     ],
   ];
 }
 
+<<<<<<< HEAD
 // fair outcome from both client seeds + server seed
+=======
+// helpers
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+// fair randomness (HMAC over both client seeds and server seed)
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 function deriveOutcome({ serverSeed, clientSeedA, clientSeedB, nonce }) {
   const h = crypto
     .createHmac("sha256", serverSeed)
@@ -125,10 +207,18 @@ function deriveOutcome({ serverSeed, clientSeedA, clientSeedB, nonce }) {
   return h[0] & 1; // 0=heads, 1=tails
 }
 
+<<<<<<< HEAD
 // ---------- Build lock tx ----------
 async function buildLockTx({ playerPk, entryLamports, side, nonce, expiryUnix }) {
   const vault   = deriveVaultPda();
   const pending = derivePendingPda(playerPk, nonce);
+=======
+// ---------- Build user-paid lock (returns b64 tx) ----------
+async function buildLockTx({ playerPk, entryLamports, side, nonce, expiryUnix }) {
+  const vault   = deriveVaultPda();
+  const pending = derivePendingPda(playerPk, nonce);
+
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   const ix = {
     programId: COINFLIP_PROGRAM_ID,
     keys: [
@@ -139,6 +229,10 @@ async function buildLockTx({ playerPk, entryLamports, side, nonce, expiryUnix })
     ],
     data: encLockArgs({ entryLamports, side, nonce, expiryUnix }),
   };
+<<<<<<< HEAD
+=======
+
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   const cu = ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 });
   const { blockhash } = await connection.getLatestBlockhash("confirmed");
   const msg = new TransactionMessage({
@@ -149,6 +243,10 @@ async function buildLockTx({ playerPk, entryLamports, side, nonce, expiryUnix })
 
   const vtx = new VersionedTransaction(msg);
 
+<<<<<<< HEAD
+=======
+  // simulate: allow "insufficient lamports", block ABI mismatch
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   const sim = await connection.simulateTransaction(vtx, { sigVerify: false });
   if (sim.value.err) {
     const logs = (sim.value.logs || []).join("\n");
@@ -167,11 +265,19 @@ async function buildLockTx({ playerPk, entryLamports, side, nonce, expiryUnix })
   };
 }
 
+<<<<<<< HEAD
 // ---------- Bot lock (server-signed & sent) ----------
+=======
+// ---------- Server-signed lock for BOT (sends on-chain immediately) ----------
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 async function sendBotLockTx({ bot, entryLamports, side, nonce, expiryUnix }) {
   const playerPk = bot.publicKey;
   const vault   = deriveVaultPda();
   const pending = derivePendingPda(playerPk, nonce);
+<<<<<<< HEAD
+=======
+
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   const ix = {
     programId: COINFLIP_PROGRAM_ID,
     keys: [
@@ -182,6 +288,10 @@ async function sendBotLockTx({ bot, entryLamports, side, nonce, expiryUnix }) {
     ],
     data: encLockArgs({ entryLamports, side, nonce, expiryUnix }),
   };
+<<<<<<< HEAD
+=======
+
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   const cu = ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 });
   const { blockhash } = await connection.getLatestBlockhash("confirmed");
   const msg = new TransactionMessage({
@@ -189,19 +299,31 @@ async function sendBotLockTx({ bot, entryLamports, side, nonce, expiryUnix }) {
     recentBlockhash: blockhash,
     instructions: [cu, ix],
   }).compileToV0Message();
+<<<<<<< HEAD
   const vtx = new VersionedTransaction(msg);
 
+=======
+
+  const vtx = new VersionedTransaction(msg);
+
+  // For bot: do not ignore insufficient lamports
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   const sim = await connection.simulateTransaction(vtx, { sigVerify: false });
   if (sim.value.err) {
     const logs = (sim.value.logs || []).join("\n");
     throw new Error(`BOT LOCK simulate failed: ${JSON.stringify(sim.value.err)}\n${logs}`);
   }
+<<<<<<< HEAD
+=======
+
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   vtx.sign([bot]);
   const sig = await connection.sendRawTransaction(vtx.serialize(), {
     skipPreflight: false,
     maxRetries: 5,
   });
   await connection.confirmTransaction(sig, "confirmed");
+<<<<<<< HEAD
   return { pending: pending.toBase58(), txSig: sig };
 }
 
@@ -210,6 +332,20 @@ async function sendResolve({ playerPk, pending, payoutLamports, nonce, winnerSid
   const vault     = deriveVaultPda();
   const adminPda  = deriveAdminPda();
   const adminAuth = ADMIN_PK;
+=======
+
+  return {
+    pending: pending.toBase58(),
+    txSig: sig,
+  };
+}
+
+// ---------- Resolve (server-paid) for one player ----------
+async function sendResolve({ playerPk, pending, payoutLamports, nonce, winnerSide }) {
+  const vault     = deriveVaultPda();
+  const adminPda  = deriveAdminPda();          // may not exist; we try several layouts
+  const adminAuth = ADMIN_PK;                  // ed25519 pubkey (not system account)
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   const feePayer  = await getServerKeypair();
 
   const msgBuf = Buffer.concat([
@@ -220,7 +356,15 @@ async function sendResolve({ playerPk, pending, payoutLamports, nonce, winnerSid
     Buffer.from(String(nonce)),
   ]);
   const edSig = await signMessageEd25519(msgBuf);
+<<<<<<< HEAD
   const edIx  = buildEd25519VerifyIx({ publicKey: ADMIN_PK, message: msgBuf, signature: edSig });
+=======
+  const edIx  = buildEd25519VerifyIx({
+    publicKey: ADMIN_PK,
+    message: msgBuf,
+    signature: edSig,
+  });
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   const edIndex = 1;
 
   const data = encResolveArgs({
@@ -250,6 +394,10 @@ async function sendResolve({ playerPk, pending, payoutLamports, nonce, winnerSid
         recentBlockhash: blockhash,
         instructions: [cu, edIx, ix],
       }).compileToV0Message();
+<<<<<<< HEAD
+=======
+
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
       const vtx = new VersionedTransaction(msg);
 
       const sim = await connection.simulateTransaction(vtx, { sigVerify: false });
@@ -275,10 +423,17 @@ async function sendResolve({ playerPk, pending, payoutLamports, nonce, winnerSid
 }
 
 // ---------------- Matchmaking ----------------
+<<<<<<< HEAD
 const waiting = [];
 const rooms = new Map();
 
 // create room (A & B can be human/bot)
+=======
+const waiting = []; // queue of { socketId, playerPk, entryLamports, side, clientSeed, tExpire, timer }
+const rooms = new Map(); // nonce -> { A, B, entryLamports, readyA, readyB, pendingA, pendingB, serverSeed, sameSide }
+
+// make a room with two participants (human or bot)
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 async function createRoom(io, A, B) {
   const nonce = Date.now();
   const expiryUnix = Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
@@ -286,6 +441,10 @@ async function createRoom(io, A, B) {
 
   const entryLamports = BigInt(A.entryLamports);
 
+<<<<<<< HEAD
+=======
+  // A & B may be bot/human; normalize
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   const AA = { ...A, playerPk: new PublicKey(A.playerPk) };
   const BB = { ...B, playerPk: new PublicKey(B.playerPk) };
 
@@ -301,6 +460,7 @@ async function createRoom(io, A, B) {
     sameSide: Number(AA.side) === Number(BB.side),
   });
 
+<<<<<<< HEAD
   const builtA = await buildLockTx({ playerPk: AA.playerPk, entryLamports, side: Number(AA.side), nonce, expiryUnix });
 
   let builtB;
@@ -311,11 +471,47 @@ async function createRoom(io, A, B) {
     rooms.get(nonce).readyB = true;
   } else {
     builtB = await buildLockTx({ playerPk: BB.playerPk, entryLamports, side: Number(BB.side), nonce, expiryUnix });
+=======
+  // Build locks
+  const builtA = await buildLockTx({
+    playerPk: AA.playerPk,
+    entryLamports,
+    side: Number(AA.side),
+    nonce,
+    expiryUnix,
+  });
+
+  let builtB;
+  if (BB.isBot) {
+    // bot locks immediately on-chain
+    const bot = await getServerKeypair();
+    const sent = await sendBotLockTx({
+      bot,
+      entryLamports,
+      side: Number(BB.side),
+      nonce,
+      expiryUnix,
+    });
+    rooms.get(nonce).pendingB = sent.pending;
+    rooms.get(nonce).readyB = true; // bot already locked
+  } else {
+    builtB = await buildLockTx({
+      playerPk: BB.playerPk,
+      entryLamports,
+      side: Number(BB.side),
+      nonce,
+      expiryUnix,
+    });
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   }
 
   rooms.get(nonce).pendingA = builtA.pending;
   if (builtB) rooms.get(nonce).pendingB = builtB.pending;
 
+<<<<<<< HEAD
+=======
+  // send lock to humans
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   if (!AA.isBot) {
     io.to(AA.socketId).emit("coinflip:lock_tx", {
       nonce: String(nonce),
@@ -330,6 +526,10 @@ async function createRoom(io, A, B) {
       opponent: BB.isBot ? "bot" : "human",
     });
   }
+<<<<<<< HEAD
+=======
+
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
   if (!BB?.isBot) {
     io.to(BB.socketId).emit("coinflip:lock_tx", {
       nonce: String(nonce),
@@ -348,8 +548,11 @@ async function createRoom(io, A, B) {
   return nonce;
 }
 
+<<<<<<< HEAD
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
+=======
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 function attachCoinflip(io) {
   io.on("connection", (socket) => {
     socket.on("register", ({ player }) => { socket.data.player = String(player || "guest"); });
@@ -363,10 +566,15 @@ function attachCoinflip(io) {
       }
     });
 
+<<<<<<< HEAD
+=======
+    // player joins queue (side: 0=heads, 1=tails). match by stake; prefer opposite side.
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
     socket.on("coinflip:join", async ({ player, side, entryLamports, clientSeed }) => {
       try {
         if (!player) return socket.emit("coinflip:error", { code: "NO_PLAYER", message: "player required" });
 
+<<<<<<< HEAD
         // admin gate & min/max
         const cfg = await DB.getGameConfig?.("coinflip");
         if (cfg && (!cfg.enabled || !cfg.running)) {
@@ -375,12 +583,15 @@ function attachCoinflip(io) {
         const min = BigInt(cfg?.min_bet_lamports ?? 50000);
         const max = BigInt(cfg?.max_bet_lamports ?? 5_000_000_000n);
 
+=======
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
         const playerPk = new PublicKey(player);
         const s = clamp(Number(side), 0, 1);
         const stake = BigInt(entryLamports || 0);
         if (!(stake > 0n)) {
           return socket.emit("coinflip:error", { code: "BAD_BET", message: "entryLamports must be > 0" });
         }
+<<<<<<< HEAD
         if (stake < min || stake > max) {
           return socket.emit("coinflip:error", { code: "BET_RANGE", message: "Bet outside allowed range" });
         }
@@ -391,22 +602,57 @@ function attachCoinflip(io) {
         );
         if (oppIdx < 0) {
           // allow same-side match
+=======
+
+        // prefer an opposite-side opponent with same stake
+        let oppIdx = waiting.findIndex(
+          (w) => w.entryLamports === String(stake) && Number(w.side) !== s
+        );
+
+        // if not found, allow same-side match (your requirement: match even if both chose same side)
+        if (oppIdx < 0) {
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
           oppIdx = waiting.findIndex(
             (w) => w.entryLamports === String(stake) && Number(w.side) === s
           );
         }
 
         if (oppIdx >= 0) {
+<<<<<<< HEAD
           const opponent = waiting.splice(oppIdx, 1)[0];
           clearTimeout(opponent.timer);
 
           const A = { socketId: opponent.socketId, playerPk: opponent.playerPk, entryLamports: String(stake), side: Number(opponent.side), clientSeed: opponent.clientSeed };
           const B = { socketId: socket.id,        playerPk: playerPk.toBase58(), entryLamports: String(stake), side: s, clientSeed: String(clientSeed || "") };
+=======
+          // pair now
+          const opponent = waiting.splice(oppIdx, 1)[0];
+          clearTimeout(opponent.timer);
+
+          const A = {
+            socketId: opponent.socketId,
+            playerPk: opponent.playerPk,
+            entryLamports: String(stake),
+            side: Number(opponent.side),
+            clientSeed: opponent.clientSeed,
+          };
+          const B = {
+            socketId: socket.id,
+            playerPk: playerPk.toBase58(),
+            entryLamports: String(stake),
+            side: s,
+            clientSeed: String(clientSeed || ""),
+          };
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 
           await createRoom(io, A, B);
           return;
         }
 
+<<<<<<< HEAD
+=======
+        // enqueue and arm bot-after-10s
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
         const w = {
           socketId: socket.id,
           playerPk: playerPk.toBase58(),
@@ -418,6 +664,7 @@ function attachCoinflip(io) {
         };
 
         w.timer = setTimeout(async () => {
+<<<<<<< HEAD
           const idx = waiting.findIndex((x) => x === w);
           if (idx < 0) return;
           waiting.splice(idx, 1);
@@ -425,6 +672,29 @@ function attachCoinflip(io) {
           const botSide = 1 - s;
           const A = { socketId: socket.id, playerPk: w.playerPk, entryLamports: String(stake), side: s, clientSeed: w.clientSeed };
           const B = { socketId: null, playerPk: (await getServerKeypair()).publicKey.toBase58(), entryLamports: String(stake), side: botSide, clientSeed: "", isBot: true };
+=======
+          // if still in queue -> bot joins with *opposite* side to ensure standard heads/tails mapping
+          const idx = waiting.findIndex((x) => x === w);
+          if (idx < 0) return; // already paired
+          waiting.splice(idx, 1);
+
+          const botSide = 1 - s; // opposite of the human's choice
+          const A = {
+            socketId: socket.id,
+            playerPk: w.playerPk,
+            entryLamports: String(stake),
+            side: s,
+            clientSeed: w.clientSeed,
+          };
+          const B = {
+            socketId: null,
+            playerPk: (await getServerKeypair()).publicKey.toBase58(),
+            entryLamports: String(stake),
+            side: botSide,
+            clientSeed: "", // server seed drives fairness anyway
+            isBot: true,
+          };
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
           try {
             await createRoom(io, A, B);
           } catch (e) {
@@ -440,7 +710,12 @@ function attachCoinflip(io) {
       }
     });
 
+<<<<<<< HEAD
     socket.on("coinflip:lock_confirmed", async ({ nonce }) => {
+=======
+    // client confirmed lock on-chain
+    socket.on("coinflip:lock_confirmed", ({ nonce }) => {
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
       const room = rooms.get(Number(nonce));
       if (!room) return socket.emit("coinflip:error", { code: "ROOM_MISSING", message: "no match" });
 
@@ -448,6 +723,10 @@ function attachCoinflip(io) {
       if (socket.id === room.B.socketId) room.readyB = true;
 
       if (room.readyA && room.readyB) {
+<<<<<<< HEAD
+=======
+        // Decide outcome
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
         const outcome = deriveOutcome({
           serverSeed: room.serverSeed,
           clientSeedA: room.A.clientSeed,
@@ -457,18 +736,30 @@ function attachCoinflip(io) {
 
         let winnerKey = null;
         if (room.sameSide) {
+<<<<<<< HEAD
           winnerKey = outcome === 0 ? "A" : "B";
         } else {
+=======
+          // both chose the same side -> choose winner purely by RNG (0 => A wins, 1 => B wins)
+          winnerKey = outcome === 0 ? "A" : "B";
+        } else {
+          // standard mapping: side 0=heads wins if outcome==0, side 1=tails wins if outcome==1
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
           winnerKey = (outcome === room.A.side) ? "A" : "B";
         }
         const loserKey = winnerKey === "A" ? "B" : "A";
 
+<<<<<<< HEAD
         // fee from admin config (fallback DEFAULT_FEE_BPS)
         const cfg = await DB.getGameConfig?.("coinflip").catch(()=>null);
         const feeBps = Number(cfg?.fee_bps ?? DEFAULT_FEE_BPS);
 
         const totalPot = room.entryLamports * 2n;
         const fee = (totalPot * BigInt(feeBps)) / 10000n;
+=======
+        const totalPot = room.entryLamports * 2n;
+        const fee = (totalPot * BigInt(FEE_BPS)) / 10000n;
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
         const payout = totalPot - fee;
 
         const winnerPlayer = room[winnerKey].playerPk;
@@ -477,7 +768,11 @@ function attachCoinflip(io) {
         const winnerPending = room[winnerKey === "A" ? "pendingA" : "pendingB"];
         const loserPending  = room[winnerKey === "A" ? "pendingB" : "pendingA"];
 
+<<<<<<< HEAD
         // tell both clients to start animation with server outcome
+=======
+        // let both clients know we're flipping
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
         if (room.A.socketId) io.to(room.A.socketId).emit("coinflip:starting", { nonce: String(nonce), outcome });
         if (room.B.socketId) io.to(room.B.socketId).emit("coinflip:starting", { nonce: String(nonce), outcome });
 
@@ -485,19 +780,28 @@ function attachCoinflip(io) {
           try {
             const sigW = await sendResolve({
               playerPk: winnerPlayer,
+<<<<<<< HEAD
               pending: room[winnerKey === "A" ? "pendingA" : "pendingB"],
+=======
+              pending: winnerPending,
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
               payoutLamports: payout,
               nonce: Number(nonce),
               winnerSide: outcome,
             });
             const sigL = await sendResolve({
               playerPk: loserPlayer,
+<<<<<<< HEAD
               pending: room[winnerKey === "A" ? "pendingB" : "pendingA"],
+=======
+              pending: loserPending,
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
               payoutLamports: 0n,
               nonce: Number(nonce),
               winnerSide: outcome,
             });
 
+<<<<<<< HEAD
             // persist match + activity
             try {
               await DB.recordCoinflipMatch?.({
@@ -521,11 +825,17 @@ function attachCoinflip(io) {
               console.warn("[coinflip] DB save warn:", e?.message || e);
             }
 
+=======
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
             io.emit("coinflip:resolved", {
               nonce: String(nonce),
               outcome,                          // 0=heads,1=tails
               feeLamports: Number(fee),
+<<<<<<< HEAD
               payoutLamports: Number(payout),   // winner payout (net)
+=======
+              payoutLamports: Number(payout),   // winner payout (net of fee)
+>>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
               txWinner: sigW,
               txLoser: sigL,
             });
