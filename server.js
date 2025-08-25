@@ -1,5 +1,3 @@
-<<<<<<< HEAD
-=======
 
 // require("dotenv").config();
 
@@ -432,7 +430,6 @@
 // });
 
 
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 // server.js
 require("dotenv").config();
 
@@ -461,7 +458,6 @@ const { ADMIN_PK, buildMessageBytes, signMessageEd25519 } = require("./signer");
 const CLUSTER = process.env.CLUSTER || "https://api.devnet.solana.com";
 const connection = new Connection(CLUSTER, "confirmed");
 
-<<<<<<< HEAD
 if (!process.env.PROGRAM_ID) throw new Error("PROGRAM_ID missing in .env");
 const PROGRAM_ID = new PublicKey(process.env.PROGRAM_ID);
 
@@ -482,7 +478,6 @@ db.ensureSchema?.().catch((e) => {
 function anchorDisc(globalSnakeName) {
   return crypto.createHash("sha256").update(`global:${globalSnakeName}`).digest().slice(0, 8);
 }
-=======
 // Dice (HTTP) program ID (backward-compat: PROGRAM_ID is dice)
 if (!process.env.PROGRAM_ID) throw new Error("PROGRAM_ID missing in .env");
 const PROGRAM_ID = new PublicKey(process.env.PROGRAM_ID);
@@ -517,7 +512,6 @@ function anchorDisc(globalSnakeName) {
   return crypto.createHash("sha256").update(`global:${globalSnakeName}`).digest().slice(0, 8);
 }
 
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 function encodePlaceBetLockArgs({ betAmount, betType, target, nonce, expiryUnix }) {
   // [disc:8][u64 bet_amount][u8 bet_type][u8 target][u64 nonce][i64 expiry]
   const disc = anchorDisc("place_bet_lock");
@@ -529,10 +523,7 @@ function encodePlaceBetLockArgs({ betAmount, betType, target, nonce, expiryUnix 
   buf.writeBigInt64LE(BigInt(expiryUnix), o); o += 8;
   return buf;
 }
-<<<<<<< HEAD
-=======
 
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 function encodeResolveBetArgs({ roll, payout, ed25519InstrIndex }) {
   // [disc:8][u8 roll][u64 payout][u8 ed_index]
   const disc = anchorDisc("resolve_bet");
@@ -565,10 +556,7 @@ function resolveBetKeys({ player, vaultPda, adminPda, pendingBetPda }) {
 // ---------- Express ----------
 const app = express();
 
-<<<<<<< HEAD
-=======
 // CORS (allow multiple origins via comma-separated env, else "*")
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || "*")
   .split(",")
   .map((s) => s.trim())
@@ -587,10 +575,7 @@ app.use(bodyParser.json());
 app.get("/health", (_req, res) => {
   res.json({ ok: true, cluster: CLUSTER, programId: PROGRAM_ID.toBase58() });
 });
-<<<<<<< HEAD
-=======
 
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 app.get("/health/all", (_req, res) => {
   res.json({
     ok: true,
@@ -602,11 +587,8 @@ app.get("/health/all", (_req, res) => {
   });
 });
 
-<<<<<<< HEAD
 // Public rules (fallbacks)
-=======
 // Rules
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 app.get("/rules", async (_req, res) => {
   try {
     let rules = { rtp_bps: 9900, min_bet_lamports: 50000, max_bet_lamports: 5000000000 };
@@ -636,12 +618,10 @@ app.post("/bets/deposit_prepare", async (req, res) => {
     const playerPk = new PublicKey(player);
     const betTypeNum = betType === "over" ? 1 : 0;
 
-<<<<<<< HEAD
     // min/max by config (dice)
     const cfg = await db.getGameConfig?.("dice");
     const min_bet_lamports = BigInt(cfg?.min_bet_lamports ?? 50000);
     const max_bet_lamports = BigInt(cfg?.max_bet_lamports ?? 5000000000);
-=======
     let rtp_bps = 9900;
     let min_bet_lamports = 50000n;
     let max_bet_lamports = 5000000000n;
@@ -651,7 +631,6 @@ app.post("/bets/deposit_prepare", async (req, res) => {
       min_bet_lamports = BigInt(rules.min_bet_lamports || min_bet_lamports);
       max_bet_lamports = BigInt(rules.max_bet_lamports || max_bet_lamports);
     }
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 
     const betAmt = BigInt(betAmountLamports);
     if (betAmt < min_bet_lamports || betAmt > max_bet_lamports) {
@@ -759,10 +738,7 @@ app.post("/bets/resolve_prepare", async (req, res) => {
 
     const expiryUnix = Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
 
-<<<<<<< HEAD
-=======
     // canonical message checked on-chain by ed25519
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
     const msg = buildMessageBytes({
       programId: PROGRAM_ID.toBuffer(),
       vault: vaultPda.toBuffer(),
@@ -778,11 +754,8 @@ app.post("/bets/resolve_prepare", async (req, res) => {
 
     const signature = await signMessageEd25519(msg);
     const edIx = buildEd25519VerifyIx({ message: msg, signature, publicKey: ADMIN_PK });
-<<<<<<< HEAD
     const edIndex = 2;
-=======
     const edIndex = 2; // price=0, limit=1, ed=2, resolve=3
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 
     const pendingBetSeed = Buffer.alloc(8); pendingBetSeed.writeBigUInt64LE(nonce);
     const pendingBetPda = PublicKey.findProgramAddressSync(
@@ -831,7 +804,6 @@ app.post("/bets/resolve_prepare", async (req, res) => {
   }
 });
 
-<<<<<<< HEAD
 // ---------------- Admin APIs (Games + Dashboard) ----------------
 app.get("/admin/games", async (_req, res) => {
   try {
@@ -1059,8 +1031,6 @@ app.patch("/admin/transactions/:id/status", async (req, res) => {
   }
 });
 
-=======
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 // ---------- HTTP server + Socket.IO ----------
 const PORT = Number(process.env.PORT || 4000);
 const server = http.createServer(app);
@@ -1094,7 +1064,6 @@ function mountWs(modulePath, name, attachName) {
   }
 }
 
-<<<<<<< HEAD
 // Slots
 mountWs("./slots_ws", "Slots", "attachSlots");
 // Crash
@@ -1104,7 +1073,6 @@ mountWs("./plinko_ws", "Plinko", "attachPlinko");
 // Coinflip
 mountWs("./coinflip_ws", "Coinflip", "attachCoinflip");
 // Mines
-=======
 // ---- Mount WS modules ----
 // Slots (uses your dice rails)
 mountWs("./slots_ws", "Slots", "attachSlots");
@@ -1119,7 +1087,6 @@ mountWs("./plinko_ws", "Plinko", "attachPlinko");
 mountWs("./coinflip_ws", "Coinflip", "attachCoinflip");
  // mines 
 // Mines WS (separate mines program)
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 try {
   require("./mines_ws").attachMines(io);
   console.log("Mines WS mounted");
@@ -1127,17 +1094,11 @@ try {
   console.warn("mines_ws not found / failed to mount:", e?.message || e);
 }
 
-<<<<<<< HEAD
-=======
 // Start server
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
 server.listen(PORT, () => {
   console.log(
     `api up on :${PORT} (cluster=${CLUSTER}, dice_program=${PROGRAM_ID.toBase58()}, crash_program=${CRASH_PROGRAM_ID || "—"}, plinko_program=${PLINKO_PROGRAM_ID || "—"}, coinflip_program=${COINFLIP_PROGRAM_ID || "—"})`
   );
 });
-<<<<<<< HEAD
-=======
 
 
->>>>>>> 13a6c3588aba0dc69b35ff221670fadb1d25d506
