@@ -43,7 +43,7 @@ const buildEd25519VerifyIx = sol.buildEd25519VerifyIx;
 // ----- PDAs -----
 
 const FEE_BPS = Number(process.env.COINFLIP_FEE_BPS || 600);           // 6%
-const QUEUE_TTL_MS = Number(process.env.COINFLIP_QUEUE_TTL_MS || 10000);
+
 const PENDING_SEED = String(process.env.COINFLIP_PENDING_SEED || "match");
 
 // Common sysvars
