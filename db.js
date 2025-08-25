@@ -510,7 +510,7 @@ async function listTransactions({ page=1, limit=20, type='all', status='all', ga
   const base = `
     ${_transactionsCte()}
     select
-      (t.source*1000000000 + t.real_id)::bigint as id,
+      ((t.source::bigint * 1000000000::bigint) + t.real_id)::bigint as id,
       coalesce(u.username, t.wallet) as username,
       t.wallet as "walletAddress",
       t.type,
