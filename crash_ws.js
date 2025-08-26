@@ -109,22 +109,54 @@ function pendingPdaFor(playerPk, nonce) {
   return PublicKey.findProgramAddressSync([Buffer.from("round"), playerPk.toBuffer(), nb], CRASH_PROGRAM_ID)[0];
 }
 
+// // server fee payer
+// function feePayer() {
+//   let secret;
+//   if (process.env.SOLANA_KEYPAIR) {
+//     // if env variable is a path
+//     const keyPath = process.env.SOLANA_KEYPAIR;
+//     const fileContents = fs.readFileSync(keyPath, "utf8");
+//     secret = Uint8Array.from(JSON.parse(fileContents));
+//   } else {
+//     // fallback to default solana key
+//     const keyPath = process.env.ANCHOR_WALLET || path.join(os.homedir(), ".config/solana/id.json");
+//     const fileContents = fs.readFileSync(keyPath, "utf8");
+//     secret = Uint8Array.from(JSON.parse(fileContents));
+//   }
+//   return Keypair.fromSecretKey(secret);
+// }
+
 // server fee payer
 function feePayer() {
   let secret;
+
   if (process.env.SOLANA_KEYPAIR) {
-    // if env variable is a path
-    const keyPath = process.env.SOLANA_KEYPAIR;
-    const fileContents = fs.readFileSync(keyPath, "utf8");
-    secret = Uint8Array.from(JSON.parse(fileContents));
+    const keyEnv = process.env.SOLANA_KEYPAIR.trim();
+
+    try {
+      if (keyEnv.startsWith("[") && keyEnv.endsWith("]")) {
+        // ✅ case: env contains the JSON array directly
+        secret = Uint8Array.from(JSON.parse(keyEnv));
+      } else {
+        // ✅ case: env contains a file path
+        const fileContents = fs.readFileSync(keyEnv, "utf8");
+        secret = Uint8Array.from(JSON.parse(fileContents));
+      }
+    } catch (err) {
+      throw new Error("Invalid SOLANA_KEYPAIR format: " + err.message);
+    }
   } else {
     // fallback to default solana key
-    const keyPath = process.env.ANCHOR_WALLET || path.join(os.homedir(), ".config/solana/id.json");
+    const keyPath =
+      process.env.ANCHOR_WALLET ||
+      path.join(os.homedir(), ".config/solana/id.json");
     const fileContents = fs.readFileSync(keyPath, "utf8");
     secret = Uint8Array.from(JSON.parse(fileContents));
   }
+
   return Keypair.fromSecretKey(secret);
 }
+
 
 
 // rounds per server
