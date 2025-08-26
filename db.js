@@ -17,6 +17,15 @@ async function ensureSchema() {
 // Helper: always send bigint-ish params as strings to pg
 const big = (v) => (v == null ? null : String(v));
 
+// Small helper to check if a relation exists (schema-qualified or not)
+async function tableExists(name) {
+  const { rows } = await pool.query(`select to_regclass($1) as r`, [name.includes(".") ? name : `public.${name}`]);
+  return !!rows[0]?.r;
+}
+
+// intentionally exported (used by server metrics)
+async function _tableExistsUnsafe(name) { return tableExists(name); }
+
 // -------------------- rules (global RTP/min/max fallback) --------------------
 async function getRules() {
   const { rows } = await pool.query(
@@ -61,6 +70,11 @@ async function getGameConfig(game_key) {
   };
 }
 
+function pctToBps(x) {
+  const n = Math.max(0, Math.min(100, Number(x)));
+  return Math.round(n * 100);
+}
+
 async function upsertGameConfig(game_key, patch = {}) {
   // accept both snake_case and camelCase from the frontend
   const normalized = {
@@ -71,6 +85,22 @@ async function upsertGameConfig(game_key, patch = {}) {
     min_bet_lamports: patch.min_bet_lamports ?? patch.minBetLamports,
     max_bet_lamports: patch.max_bet_lamports ?? patch.maxBetLamports,
   };
+
+  // Derive from houseEdge if given
+  const he =
+    patch.houseEdgePct ??
+    patch.house_edge_pct ??
+    patch.houseEdge ??
+    patch.house_edge ??
+    undefined;
+
+  if (he != null && he !== "") {
+    const fee = pctToBps(he);
+    const rtp = Math.max(0, 10000 - fee);
+    normalized.fee_bps = fee;
+    normalized.rtp_bps = rtp;
+  }
+
   Object.keys(normalized).forEach(
     (k) => normalized[k] === undefined && delete normalized[k]
   );
@@ -89,9 +119,7 @@ async function upsertGameConfig(game_key, patch = {}) {
 
   await pool.query(
     `insert into game_configs (game_key) values ($1)
-     on conflict (game_key) do update set ${set.join(
-       ", "
-     )}, updated_at=now()`,
+     on conflict (game_key) do update set ${set.join(", ")}, updated_at=now()`,
     vals
   );
   return getGameConfig(game_key);
@@ -199,52 +227,58 @@ async function updateBetPrepared({ nonce, roll, payout }) {
 
 // -------------------- admin stats --------------------
 async function getAdminStats() {
+  // tolerate missing tables
+  const hasGR = await tableExists("game_rounds");
+  const hasCF = await tableExists("coinflip_matches");
+
   // total volume = sum of stakes (game_rounds + 2*coinflip stake per match)
-  const vol1 = await pool.query(
-    `select coalesce(sum(stake_lamports),0)::text as v from game_rounds`
-  );
-  const vol2 = await pool.query(
-    `select coalesce(sum(bet_lamports)*2,0)::text as v from coinflip_matches`
-  );
+  const vol1 = hasGR
+    ? (await pool.query(`select coalesce(sum(stake_lamports),0)::text as v from game_rounds`)).rows[0].v
+    : "0";
+  const vol2 = hasCF
+    ? (await pool.query(`select coalesce(sum(bet_lamports)*2,0)::text as v from coinflip_matches`)).rows[0].v
+    : "0";
 
   // revenue ~ stakes - payouts
-  const rev1 = await pool.query(
-    `select (coalesce(sum(stake_lamports - payout_lamports),0))::text as v from game_rounds`
-  );
-  // coinflip: pot(2*bet) - payout (winner gets pot - fee)
-  const rev2 = await pool.query(
-    `select (coalesce(sum((bet_lamports*2) - payout_lamports),0))::text as v
-     from coinflip_matches`
-  );
+  const rev1 = hasGR
+    ? (await pool.query(`select coalesce(sum(stake_lamports - payout_lamports),0)::text as v from game_rounds`)).rows[0].v
+    : "0";
+  const rev2 = hasCF
+    ? (await pool.query(`select coalesce(sum((bet_lamports*2) - payout_lamports),0)::text as v from coinflip_matches`)).rows[0].v
+    : "0";
 
   // today revenue
-  const today1 = await pool.query(
-    `select (coalesce(sum(stake_lamports - payout_lamports),0))::text as v
-     from game_rounds where created_at::date = now()::date`
-  );
-  const today2 = await pool.query(
-    `select (coalesce(sum((bet_lamports*2) - payout_lamports),0))::text as v
-     from coinflip_matches where created_at::date = now()::date`
-  );
+  const today1 = hasGR
+    ? (await pool.query(`select coalesce(sum(stake_lamports - payout_lamports),0)::text as v
+                         from game_rounds where created_at::date = now()::date`)).rows[0].v
+    : "0";
+  const today2 = hasCF
+    ? (await pool.query(`select coalesce(sum((bet_lamports*2) - payout_lamports),0)::text as v
+                         from coinflip_matches where created_at::date = now()::date`)).rows[0].v
+    : "0";
+
+  const totalVolume = BigInt(vol1) + BigInt(vol2);
+  const totalRevenue = BigInt(rev1) + BigInt(rev2);
+  const todayRevenue = BigInt(today1) + BigInt(today2);
 
   // users (distinct addresses)
-  const users1 = await pool.query(
-    `select count(distinct player) as c from game_rounds`
-  );
-  const users2 = await pool.query(
-    `select count(distinct player_a) + count(distinct player_b) as c from coinflip_matches`
-  );
+  const users1 = hasGR
+    ? Number((await pool.query(`select count(distinct player) as c from game_rounds`)).rows[0].c)
+    : 0;
+  const users2 = hasCF
+    ? Number((await pool.query(`select count(distinct player_a) + count(distinct player_b) as c from coinflip_matches`)).rows[0].c)
+    : 0;
 
-  const totalVolume = BigInt(vol1.rows[0].v) + BigInt(vol2.rows[0].v);
-  const totalRevenue = BigInt(rev1.rows[0].v) + BigInt(rev2.rows[0].v);
-  const todayRevenue = BigInt(today1.rows[0].v) + BigInt(today2.rows[0].v);
-  const totalUsers = Number(users1.rows[0].c) + Number(users2.rows[0].c);
+  const totalUsers = users1 + users2;
 
-  // last 10 activities
-  const act = await pool.query(
-    `select user_addr as "user", action, amount::text, to_char(created_at,'YYYY-MM-DD HH24:MI') as time
-     from activities order by id desc limit 10`
-  );
+  // last 10 activities (optional table)
+  const hasAct = await tableExists("activities");
+  const actRows = hasAct
+    ? (await pool.query(
+        `select user_addr as "user", action, amount::text, to_char(created_at,'YYYY-MM-DD HH24:MI') as time
+         from activities order by id desc limit 10`
+      )).rows
+    : [];
 
   return {
     stats: {
@@ -253,7 +287,7 @@ async function getAdminStats() {
       totalRevenue: totalRevenue.toString(),
       todayRevenue: todayRevenue.toString(),
     },
-    recentActivity: act.rows.map((r) => ({
+    recentActivity: actRows.map((r) => ({
       user: r.user,
       action: r.action,
       amount: r.amount,
@@ -270,6 +304,8 @@ async function getPlinkoRules(/* rows, diff */) {
 
 // -------------------- USERS: helpers for Admin --------------------
 async function upsertAppUserLastActive(user_id) {
+  const hasUsers = await tableExists("app_users");
+  if (!hasUsers) return; // silently ignore if table missing
   // username defaults to the address if not known
   await pool.query(
     `insert into app_users (user_id, username, last_active)
@@ -280,6 +316,11 @@ async function upsertAppUserLastActive(user_id) {
 }
 
 async function listUsers({ page = 1, limit = 20, status = "all", search = "" } = {}) {
+  const hasUsers = await tableExists("app_users");
+  if (!hasUsers) {
+    return { users: [], total: 0, pages: 1 };
+  }
+
   const off = Math.max(0, (Number(page) - 1) * Number(limit));
   const where = [];
   const vals = [];
@@ -294,24 +335,32 @@ async function listUsers({ page = 1, limit = 20, status = "all", search = "" } =
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
 
+  // check optional tables referenced in joins
+  const hasBets = await tableExists("bets");
+  const hasGR = await tableExists("game_rounds");
+  const hasCF = await tableExists("coinflip_matches");
+
+  const bJoin = hasBets
+    ? `left join (select player, count(*) as bets, sum( (payout_lamports > bet_amount_lamports)::int ) as wins from bets group by player) b on b.player = u.user_id`
+    : `left join (select ''::text as player, 0::int as bets, 0::int as wins) b on false`;
+
+  const grJoin = hasGR
+    ? `left join (select player, count(*) as bets, sum( (payout_lamports > stake_lamports)::int ) as wins from game_rounds group by player) gr on gr.player = u.user_id`
+    : `left join (select ''::text as player, 0::int as bets, 0::int as wins) gr on false`;
+
+  const cfJoin = hasCF
+    ? `left join (select player, count(*) as bets, sum( (winner = player)::int ) as wins
+                 from (select player_a as player, winner from coinflip_matches
+                       union all
+                       select player_b as player, winner from coinflip_matches) x
+                 group by player) cf on cf.player = u.user_id`
+    : `left join (select ''::text as player, 0::int as bets, 0::int as wins) cf on false`;
+
   const baseSql = `
     from app_users u
-    left join (
-      select player, count(*) as bets, sum( (payout_lamports > bet_amount_lamports)::int ) as wins
-      from bets group by player
-    ) b on b.player = u.user_id
-    left join (
-      select player, count(*) as bets, sum( (payout_lamports > stake_lamports)::int ) as wins
-      from game_rounds group by player
-    ) gr on gr.player = u.user_id
-    left join (
-      select player, count(*) as bets, sum( (winner = player)::int ) as wins
-      from (
-        select player_a as player, winner from coinflip_matches
-        union all
-        select player_b as player, winner from coinflip_matches
-      ) x group by player
-    ) cf on cf.player = u.user_id
+    ${bJoin}
+    ${grJoin}
+    ${cfJoin}
     ${whereSql}
   `;
 
@@ -365,6 +414,8 @@ async function getUserDetails(user_id) {
 }
 
 async function updateUserStatus(user_id, status) {
+  const hasUsers = await tableExists("app_users");
+  if (!hasUsers) throw new Error("users table missing");
   if (!["active", "disabled", "banned"].includes(String(status))) {
     throw new Error("invalid status");
   }
@@ -384,6 +435,8 @@ async function updateUserStatus(user_id, status) {
 }
 
 async function listUserActivities(user_id, limit = 50) {
+  const hasAct = await tableExists("activities");
+  if (!hasAct) return [];
   const { rows } = await pool.query(
     `select action, amount::text, created_at
      from activities
@@ -424,12 +477,27 @@ function extractGameFromAction(action) {
   return undefined;
 }
 
-// -------------------- ADMIN TRANSACTIONS (union) --------------------
-function _transactionsCte() {
-  // source: 1=bets, 2=game_rounds, 3=coinflip_matches, 4=slots_spins
-  return `
-    with t as (
-      -- DICE bets
+// Quick checks for bans
+async function isUserBanned(user_id) {
+  if (!(await tableExists("app_users"))) return false;
+  const { rows } = await pool.query(
+    `select status from app_users where user_id=$1 limit 1`,
+    [String(user_id)]
+  );
+  return (rows[0]?.status || "active") === "banned";
+}
+async function assertUserPlayable(user_id) {
+  if (await isUserBanned(user_id)) throw new Error("User is banned");
+  return true;
+}
+
+// -------------------- ADMIN TRANSACTIONS (dynamic union) --------------------
+async function _transactionsCteDynamic() {
+  // Build only from tables that exist to avoid 500s
+  const pieces = [];
+
+  if (await tableExists("bets")) {
+    pieces.push(`
       select
         1 as source,
         b.id::bigint as real_id,
@@ -441,43 +509,43 @@ function _transactionsCte() {
         (b.payout_lamports::numeric   / 1e9) as payout,
         b.status::text as status
       from bets b
-
-      union all
-
-      -- Generic game rounds (mines/plinko/crash/etc when saved there)
+    `);
+  }
+  if (await tableExists("game_rounds")) {
+    pieces.push(`
       select
-        2,
-        gr.id::bigint,
+        2 as source,
+        gr.id::bigint as real_id,
         gr.created_at,
         gr.player as wallet,
         gr.game_key as game,
-        'round'::text,
-        (gr.stake_lamports::numeric  / 1e9),
-        (gr.payout_lamports::numeric / 1e9),
-        'settled'::text
+        'round'::text as type,
+        (gr.stake_lamports::numeric  / 1e9) as amount,
+        (gr.payout_lamports::numeric / 1e9) as payout,
+        'settled'::text as status
       from game_rounds gr
-
-      union all
-
-      -- Coinflip: single row per match -> attribute to winner
+    `);
+  }
+  if (await tableExists("coinflip_matches")) {
+    pieces.push(`
       select
-        3,
-        cf.id::bigint,
+        3 as source,
+        cf.id::bigint as real_id,
         cf.created_at,
         cf.winner as wallet,
-        'coinflip'::text,
-        'match'::text,
-        ((cf.bet_lamports::numeric * 2) / 1e9) as amount,  -- pot
+        'coinflip'::text as game,
+        'match'::text as type,
+        ((cf.bet_lamports::numeric * 2) / 1e9) as amount,
         (cf.payout_lamports::numeric / 1e9) as payout,
-        'settled'::text
+        'settled'::text as status
       from coinflip_matches cf
-
-      union all
-
-      -- Slots spins (already numeric SOL)
+    `);
+  }
+  if (await tableExists("slots_spins")) {
+    pieces.push(`
       select
-        4,
-        ss.id::bigint,
+        4 as source,
+        ss.id::bigint as real_id,
         ss.created_at,
         ss.player as wallet,
         'slots'::text as game,
@@ -486,8 +554,29 @@ function _transactionsCte() {
         ss.payout::numeric     as payout,
         ss.status::text        as status
       from slots_spins ss
-    )
-  `;
+    `);
+  }
+
+  if (pieces.length === 0) {
+    // Empty CTE that returns no rows but correct column types
+    return `
+      with t as (
+        select
+          0::int as source,
+          0::bigint as real_id,
+          now() as created_at,
+          ''::text as wallet,
+          ''::text as game,
+          ''::text as type,
+          0::numeric as amount,
+          0::numeric as payout,
+          'n/a'::text as status
+        where false
+      )
+    `;
+  }
+
+  return `with t as (\n${pieces.join("\nunion all\n")}\n)`;
 }
 
 /**
@@ -501,17 +590,25 @@ async function listTransactions({ page=1, limit=20, type='all', status='all', ga
   if (type && type !== 'all')   { vals.push(type);   where.push(`t.type = $${vals.length}`); }
   if (status && status !== 'all'){ vals.push(status); where.push(`t.status = $${vals.length}`); }
   if (game && game !== 'all')   { vals.push(game);   where.push(`t.game = $${vals.length}`); }
+  const hasUsers = await tableExists("app_users");
   if (search) {
     vals.push(`%${search}%`);
-    where.push(`(u.username ilike $${vals.length} or t.wallet ilike $${vals.length})`);
+    if (hasUsers) {
+      where.push(`(u.username ilike $${vals.length} or t.wallet ilike $${vals.length})`);
+    } else {
+      where.push(`(t.wallet ilike $${vals.length})`);
+    }
   }
   const whereSql = where.length ? `where ${where.join(' and ')}` : '';
 
+  const cte = await _transactionsCteDynamic();
+  const joinUsers = hasUsers ? `left join app_users u on u.user_id = t.wallet` : `left join (select null) u on false`;
+
   const base = `
-    ${_transactionsCte()}
+    ${cte}
     select
-      (t.source*1000000000 + t.real_id)::bigint as id,
-      coalesce(u.username, t.wallet) as username,
+      ((t.source::bigint * 1000000000::bigint) + t.real_id)::bigint as id,
+      ${hasUsers ? "coalesce(u.username, t.wallet)" : "t.wallet"} as username,
       t.wallet as "walletAddress",
       t.type,
       t.game,
@@ -521,13 +618,13 @@ async function listTransactions({ page=1, limit=20, type='all', status='all', ga
       to_char(t.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "timestamp",
       t.payout::float8  as payout
     from t
-    left join app_users u on u.user_id = t.wallet
+    ${joinUsers}
     ${whereSql}
   `;
 
   // total
   const cntRes = await pool.query(
-    `${_transactionsCte()} select count(*)::int as c from t left join app_users u on u.user_id=t.wallet ${whereSql}`,
+    `${cte} select count(*)::int as c from t ${joinUsers} ${whereSql}`,
     vals
   );
   const total = Number(cntRes.rows[0]?.c || 0);
@@ -557,21 +654,22 @@ async function listTransactions({ page=1, limit=20, type='all', status='all', ga
 }
 
 /**
- * Stats summary for admin transactions
+ * Stats summary for admin transactions (dynamic)
  */
 async function getTransactionStats() {
-  const rows = await pool.query(
+  const cte = await _transactionsCteDynamic();
+  const { rows } = await pool.query(
     `
-    ${_transactionsCte()}
+    ${cte}
     select
       count(*)::int                             as total,
-      sum(t.amount)::float8                     as volume_sol,
-      sum(t.payout)::float8                     as payouts_sol,
-      (coalesce(sum(t.amount - t.payout),0))::float8 as net_revenue_sol
+      coalesce(sum(t.amount),0)::float8         as volume_sol,
+      coalesce(sum(t.payout),0)::float8         as payouts_sol,
+      coalesce(sum(t.amount - t.payout),0)::float8 as net_revenue_sol
     from t
     `
   );
-  const r = rows.rows[0] || {};
+  const r = rows[0] || {};
   return {
     total: Number(r.total || 0),
     volumeSol: Number(r.volume_sol || 0),
@@ -592,17 +690,19 @@ async function updateTransactionStatusComposite(compositeId, newStatus) {
     throw new Error('invalid status');
   }
 
-  let table = null;
-  if (source === 1) table = 'bets';
-  else if (source === 4) table = 'slots_spins';
-  else throw new Error('Status update not supported for this transaction type');
-
-  const q = await pool.query(
-    `update ${table} set status=$1 where id=$2`,
-    [ String(newStatus), Number(real_id) ]
-  );
-  if (q.rowCount === 0) throw new Error('Transaction not found');
-  return { ok: true };
+  if (source === 1) {
+    if (!(await tableExists("bets"))) throw new Error("bets table missing");
+    const q = await pool.query(`update bets set status=$1 where id=$2`, [ String(newStatus), Number(real_id) ]);
+    if (q.rowCount === 0) throw new Error('Transaction not found');
+    return { ok: true };
+  }
+  if (source === 4) {
+    if (!(await tableExists("slots_spins"))) throw new Error("slots_spins table missing");
+    const q = await pool.query(`update slots_spins set status=$1 where id=$2`, [ String(newStatus), Number(real_id) ]);
+    if (q.rowCount === 0) throw new Error('Transaction not found');
+    return { ok: true };
+  }
+  throw new Error('Status update not supported for this transaction type');
 }
 
 module.exports = {
@@ -632,8 +732,15 @@ module.exports = {
   listUserActivities,
   upsertAppUserLastActive,
 
+  // bans
+  isUserBanned,
+  assertUserPlayable,
+
   // admin transactions
   listTransactions,
   getTransactionStats,
   updateTransactionStatusComposite,
+
+  // internal
+  _tableExistsUnsafe,
 };
