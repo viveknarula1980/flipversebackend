@@ -52,7 +52,7 @@ function getClientIp(req) {
   return xf || req.ip || req.connection?.remoteAddress || "";
 }
 
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "https://flipverse-web.vercel.app";
 const PORT = Number(process.env.PORT || 4000);
 
 // ---------- PDA balance helpers (no changes to db.js required) ----------
@@ -90,7 +90,7 @@ async function main() {
   app.set("trust proxy", true);
 
   const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS ||
-    "http://localhost:3000,http://127.0.0.1:3000")
+    "https://flipverse-web.vercel.app,http://127.0.0.1:3000")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
