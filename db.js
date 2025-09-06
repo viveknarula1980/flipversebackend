@@ -14,6 +14,39 @@ async function ensureSchema() {
   await pool.query(sql);
 }
 
+// Extend existing tables to carry SOL and USD-at-time info where useful
+async function ensureAccountingExtensions() {
+  // helper to add a column if missing
+  async function ensureColumn(table, column, typeSql) {
+    await pool.query(`
+      do $$
+      begin
+        if not exists (
+          select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = $1 and column_name = $2
+        ) then
+          execute format('alter table public.%I add column %I ${typeSql}', $1, $2);
+        end if;
+      end$$;
+    `, [table, column]);
+  }
+
+  // deposits: add amount_sol, usd_at_tx, price_usd_per_sol (if not present)
+  const hasDeposits = await tableExists("deposits");
+  if (hasDeposits) {
+    await ensureColumn("deposits", "amount_sol", "double precision");
+    await ensureColumn("deposits", "usd_at_tx", "double precision");
+    await ensureColumn("deposits", "price_usd_per_sol", "double precision");
+  }
+
+  // activities: add amount_usd, price_usd_per_sol (optional)
+  const hasAct = await tableExists("activities");
+  if (hasAct) {
+    await ensureColumn("activities", "amount_usd", "double precision");
+    await ensureColumn("activities", "price_usd_per_sol", "double precision");
+  }
+}
+
 // Helper: always send bigint-ish params as strings to pg
 const big = (v) => (v == null ? null : String(v));
 
@@ -150,14 +183,47 @@ async function recordGameRound({
   await upsertAppUserLastActive(String(player));
 }
 
-async function recordActivity({ user, action, amount }) {
-  await pool.query(
-    `insert into activities (user_addr, action, amount)
-     values ($1,$2,$3)`,
-    [String(user), String(action), Number(amount)]
-  );
+/**
+ * Record activity; amount is in SOL by convention.
+ * Optionally carries amount_usd and price_usd_per_sol (columns added by ensureAccountingExtensions()).
+ */
+async function recordActivity({ user, action, amount, amount_usd = null, price_usd_per_sol = null }) {
+  // ensure optional columns exist (best effort, no throw)
+  try { if (ensureAccountingExtensions) await ensureAccountingExtensions(); } catch {}
+
+  // figure out whether the optional columns exist
+  const hasActUsd = await _hasActivityUsdCols();
+
+  if (hasActUsd) {
+    await pool.query(
+      `insert into activities (user_addr, action, amount, amount_usd, price_usd_per_sol)
+       values ($1,$2,$3,$4,$5)`,
+      [String(user), String(action), Number(amount), amount_usd != null ? Number(amount_usd) : null, price_usd_per_sol != null ? Number(price_usd_per_sol) : null]
+    );
+  } else {
+    await pool.query(
+      `insert into activities (user_addr, action, amount)
+       values ($1,$2,$3)`,
+      [String(user), String(action), Number(amount)]
+    );
+  }
+
   // keep app_users "active"
   await upsertAppUserLastActive(String(user));
+}
+
+// memoize optional cols check
+let _actColsChecked = false;
+let _actHasUsdCols = false;
+async function _hasActivityUsdCols() {
+  if (_actColsChecked) return _actHasUsdCols;
+  const { rows } = await pool.query(
+    `select column_name from information_schema.columns where table_schema='public' and table_name='activities'`
+  );
+  const cols = rows.map(r => r.column_name);
+  _actHasUsdCols = cols.includes("amount_usd") && cols.includes("price_usd_per_sol");
+  _actColsChecked = true;
+  return _actHasUsdCols;
 }
 
 // -------------------- coinflip match detail --------------------
@@ -312,6 +378,23 @@ async function upsertAppUserLastActive(user_id) {
      values ($1,$1,now())
      on conflict (user_id) do update set last_active = now()`,
     [String(user_id)]
+  );
+}
+
+/**
+ * Keep app_users.pda_balance in sync (lamports).
+ * Creates the user row if it does not exist.
+ */
+async function updatePdaBalance(user_id, pda_balance_lamports) {
+  const hasUsers = await tableExists("app_users");
+  if (!hasUsers) return;
+  await pool.query(
+    `insert into app_users (user_id, username, pda_balance, last_active)
+     values ($1,$1,$2,now())
+     on conflict (user_id) do update set
+       pda_balance = excluded.pda_balance,
+       last_active = now()`,
+    [String(user_id), Number(pda_balance_lamports)]
   );
 }
 
@@ -621,7 +704,6 @@ async function listTransactions({ page=1, limit=20, type='all', status='all', ga
     ${joinUsers}
     ${whereSql}
   `;
-
   // total
   const cntRes = await pool.query(
     `${cte} select count(*)::int as c from t ${joinUsers} ${whereSql}`,
@@ -705,9 +787,46 @@ async function updateTransactionStatusComposite(compositeId, newStatus) {
   throw new Error('Status update not supported for this transaction type');
 }
 
+/**
+ * Annotate a deposit row (matched by tx_sig) with SOL + USD information.
+ * If no row matches (e.g., API insert didn't happen), we insert a new row.
+ */
+async function annotateDepositBySig({ tx_sig, user_wallet, amount_lamports, amount_sol, usd_at_tx, price_usd_per_sol }) {
+  // ensure columns exist (best effort)
+  try { if (ensureAccountingExtensions) await ensureAccountingExtensions(); } catch {}
+
+  // Try to update by tx_sig first
+  const upd = await pool.query(
+    `update deposits
+       set amount_sol = $2,
+           usd_at_tx = $3,
+           price_usd_per_sol = $4
+     where tx_sig = $1`,
+    [ String(tx_sig || ""), Number(amount_sol || 0), Number(usd_at_tx || 0), Number(price_usd_per_sol || 0) ]
+  );
+
+  if (upd.rowCount > 0) return { ok: true, updated: true };
+
+  // If no row updated, insert (fallback)
+  await pool.query(
+    `insert into deposits (user_wallet, amount_lamports, amount_sol, usd_at_tx, price_usd_per_sol, tx_sig)
+     values ($1,$2,$3,$4,$5,$6)`,
+    [
+      String(user_wallet),
+      big(amount_lamports || 0),
+      Number(amount_sol || 0),
+      Number(usd_at_tx || 0),
+      Number(price_usd_per_sol || 0),
+      String(tx_sig || ""),
+    ]
+  );
+  return { ok: true, inserted: true };
+}
+
 module.exports = {
   pool,
   ensureSchema,
+  ensureAccountingExtensions,
   getRules,
 
   listGameConfigs,
@@ -731,6 +850,7 @@ module.exports = {
   updateUserStatus,
   listUserActivities,
   upsertAppUserLastActive,
+  updatePdaBalance,   // export
 
   // bans
   isUserBanned,
@@ -741,6 +861,10 @@ module.exports = {
   getTransactionStats,
   updateTransactionStatusComposite,
 
+  // deposits USD annotation
+  annotateDepositBySig,
+
   // internal
   _tableExistsUnsafe,
+  tableExists,
 };

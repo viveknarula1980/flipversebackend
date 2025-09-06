@@ -1,0 +1,109 @@
+[
+  {
+    "range": "STREET DEALER",
+    "quote": "First you hustle. Then you conquer.",
+    "levels": [
+      { "level": 1, "title": "Street Dealer I",  "reward": "-",                       "wagering": "-"   },
+      { "level": 2, "title": "Street Dealer II", "reward": "10 FS × $0.25 = $2.50",   "wagering": "$25" },
+      { "level": 3, "title": "Street Dealer III","reward": "20 FS × $0.25 = $5.00",   "wagering": "$50" },
+      { "level": 4, "title": "Street Dealer IV", "reward": "30 FS × $0.25 = $7.50",   "wagering": "$75" }
+    ]
+  },
+  {
+    "range": "CHIP RUNNER",
+    "quote": "You don’t exist… until something goes missing.",
+    "levels": [
+      { "level": 5, "title": "Chip Runner I",   "reward": "40 FS × $0.25 = $10.00", "wagering": "$100" },
+      { "level": 6, "title": "Chip Runner II",  "reward": "50 FS × $0.25 = $12.50", "wagering": "$125" },
+      { "level": 7, "title": "Chip Runner III", "reward": "15 USDT",                "wagering": "$150" },
+      { "level": 8, "title": "Chip Runner IV",  "reward": "20 USDT",                "wagering": "$200" }
+    ]
+  },
+  {
+    "range": "PIT HOUND",
+    "quote": "The table fears who guards it.",
+    "levels": [
+      { "level": 9,  "title": "Pit Hound I",   "reward": "25 USDT",  "wagering": "$250" },
+      { "level": 10, "title": "Pit Hound II",  "reward": "30 USDT",  "wagering": "$300" },
+      { "level": 11, "title": "Pit Hound III", "reward": "40 USDT",  "wagering": "$400" },
+      { "level": 12, "title": "Pit Hound IV",  "reward": "50 USDT",  "wagering": "$500" }
+    ]
+  },
+  {
+    "range": "BACKROOM FIXER",
+    "quote": "Winners don’t get lucky. They get chosen.",
+    "levels": [
+      { "level": 13, "title": "Backroom Fixer I",   "reward": "60 USDT",  "wagering": "$600"   },
+      { "level": 14, "title": "Backroom Fixer II",  "reward": "70 USDT",  "wagering": "$700"   },
+      { "level": 15, "title": "Backroom Fixer III", "reward": "80 USDT",  "wagering": "$800"   },
+      { "level": 16, "title": "Backroom Fixer IV",  "reward": "100 USDT", "wagering": "$1,000" }
+    ]
+  },
+  {
+    "range": "CRYPTO SHADOW",
+    "quote": "Anonymous. Untouchable. Ultra-rich.",
+    "levels": [
+      { "level": 17, "title": "Crypto Shadow I",   "reward": "120 USDT", "wagering": "$1,200" },
+      { "level": 18, "title": "Crypto Shadow II",  "reward": "140 USDT", "wagering": "$1,400" },
+      { "level": 19, "title": "Crypto Shadow III", "reward": "160 USDT", "wagering": "$1,600" },
+      { "level": 20, "title": "Crypto Shadow IV",  "reward": "180 USDT", "wagering": "$1,800" }
+    ]
+  },
+  {
+    "range": "HOUSE MANAGER",
+    "quote": "The house always wins. Because you are the house.",
+    "levels": [
+      { "level": 21, "title": "House Manager I",   "reward": "200 USDT", "wagering": "$2,000" },
+      { "level": 22, "title": "House Manager II",  "reward": "250 USDT", "wagering": "$2,500" },
+      { "level": 23, "title": "House Manager III", "reward": "300 USDT", "wagering": "$3,000" },
+      { "level": 24, "title": "House Manager IV",  "reward": "350 USDT", "wagering": "$3,500" }
+    ]
+  },
+  {
+    "range": "LOUNGE OVERLORD",
+    "quote": "Power walks in silence... with Cuban heels.",
+    "levels": [
+      { "level": 25, "title": "Lounge Overlord I",   "reward": "400 USDT", "wagering": "$4,000" },
+      { "level": 26, "title": "Lounge Overlord II",  "reward": "500 USDT", "wagering": "$5,000" },
+      { "level": 27, "title": "Lounge Overlord III", "reward": "600 USDT", "wagering": "$6,000" },
+      { "level": 28, "title": "Lounge Overlord IV",  "reward": "700 USDT", "wagering": "$7,000" }
+    ]
+  },
+  {
+    "range": "JACKPOT DRAGON",
+    "quote": "Legends don't hit the jackpot. They are the jackpot.",
+    "levels": [
+      { "level": 29, "title": "Jackpot Dragon I",   "reward": "800 USDT",  "wagering": "$8,000"  },
+      { "level": 30, "title": "Jackpot Dragon II",  "reward": "1,000 USDT","wagering": "$10,000" },
+      { "level": 31, "title": "Jackpot Dragon III", "reward": "1,200 USDT","wagering": "$12,000" },
+      { "level": 32, "title": "Jackpot Dragon IV",  "reward": "1,400 USDT","wagering": "$14,000" }
+    ]
+  },
+  {
+    "range": "ZOGGY’S INNER CIRCLE",
+    "quote": "One message from you, and the chips fall.",
+    "levels": [
+      { "level": 33, "title": "Inner Circle I",   "reward": "1,600 USDT","wagering": "$16,000" },
+      { "level": 34, "title": "Inner Circle II",  "reward": "1,800 USDT","wagering": "$18,000" },
+      { "level": 35, "title": "Inner Circle III", "reward": "2,000 USDT","wagering": "$20,000" },
+      { "level": 36, "title": "Inner Circle IV",  "reward": "2,500 USDT","wagering": "$25,000" }
+    ]
+  },
+  {
+    "range": "THE UNDERWORLD DON",
+    "quote": "The casino is your empire. The city, your board.",
+    "levels": [
+      { "level": 37, "title": "Underworld Don I",   "reward": "3,000 USDT",  "wagering": "$30,000"  },
+      { "level": 38, "title": "Underworld Don II",  "reward": "3,500 USDT",  "wagering": "$35,000"  },
+      { "level": 39, "title": "Underworld Don III", "reward": "5,000 USDT",  "wagering": "$50,000"  },
+      { "level": 40, "title": "Underworld Don IV",  "reward": "10,000 USDT", "wagering": "$100,000" }
+    ]
+  },
+  {
+    "range": "ZOGGY IMMORTAL",
+    "quote": "You're no longer a player. You're the myth every gambler whispers about.",
+    "levels": [
+      { "level": 41, "title": "Zoggy Immortal", "reward": "20,000 USDT", "wagering": "$20,000×1", "bonus": "Animated badge + Exclusive skin" }
+    ]
+  }
+]
