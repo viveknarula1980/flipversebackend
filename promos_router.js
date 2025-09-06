@@ -47,7 +47,7 @@ const CONTRIBUTION_RATES = {
 const COINFLIP_UNIQUE_OPP_REQ = Number(process.env.BONUS_COINFLIP_MIN_UNIQUE_OPPONENTS || 5);
 const COINFLIP_DAILY_WR_CAP_USD = Number(process.env.BONUS_COINFLIP_DAILY_WR_CAP_USD || 200);
 
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "https://flipverse-web.vercel.app";
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
 // where the API is hosted (used to build the /r/:code tracker link we show to users)
 const API_BASE =
   process.env.API_BASE_URL ||
