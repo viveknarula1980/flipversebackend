@@ -44,7 +44,6 @@ function rowLevelToApi(l, withRange = false) {
     isActive: !!l.is_active,
     created_at: l.created_at,
     updated_at: l.updated_at,
-    // per-level aggregates for Admin UI
     total_claimed: Number(l.total_claimed || 0),
     total_users: Number(l.total_users || 0),
   };
@@ -94,13 +93,10 @@ function parseUsdFromDollarString(s) {
 
 function parseAmountFromReward(reward) {
   if (!reward) return 0;
-  // try "... = $X"
   const eq = String(reward).match(/=\s*\$?([\d,]+(?:\.\d+)?)/i);
   if (eq) return Number(eq[1].replace(/,/g, ""));
-  // try "$X" or "X USDT"
   const sim = String(reward).match(/(?:\$|USDT)\s*([\d,]+(?:\.\d+)?)/i);
   if (sim) return Number(sim[1].replace(/,/g, ""));
-  // fallback: first number
   const any = String(reward).match(/([\d,]+(?:\.\d+)?)/);
   return any ? Number(any[1].replace(/,/g, "")) : 0;
 }
@@ -597,27 +593,6 @@ router.post("/admin/rewards/upload-icon", upload.single("icon"), async (req, res
   }
 });
 
-/* ===================== Admin: Rewards Summary ===================== */
-router.get("/admin/rewards/summary", async (_req, res) => {
-  try {
-    const { rows } = await db.pool.query(`
-      select
-        coalesce(sum(amount),0)::float8            as total_rewards_paid_usd,
-        count(distinct user_id)::int               as total_users,
-        count(*)::int                              as total_claims
-      from reward_claims
-    `);
-    const r = rows[0] || {};
-    res.json({
-      totalRewardsPaidUsd: Number(r.total_rewards_paid_usd || 0),
-      totalUsers:          Number(r.total_users || 0),
-      totalClaims:         Number(r.total_claims || 0),
-    });
-  } catch (e) {
-    res.status(500).json({ error: e?.message || String(e) });
-  }
-});
-
 /* ===================== PUBLIC: Real Top Leaderboard ===================== */
 async function aggregateWageredLamportsMap() {
   const map = new Map(); // wallet -> BigInt lamports
@@ -666,9 +641,13 @@ router.get("/leaderboard/top", async (req, res) => {
       wager_lamports: BigInt(lam),
       total_wagered_usd: lamportsToUsd(BigInt(lam)),
     }));
-    all.sort((a, b) => b.wager_lamports - a.wager_lamports);
-    const top = all.slice(0, limit);
 
+    // IMPORTANT: return a numeric comparator (avoid BigInt subtraction)
+    all.sort((a, b) =>
+      a.wager_lamports < b.wager_lamports ? 1 : a.wager_lamports > b.wager_lamports ? -1 : 0
+    );
+
+    const top = all.slice(0, limit);
     if (!top.length) return res.json([]);
 
     const wallets = top.map((t) => t.wallet);
