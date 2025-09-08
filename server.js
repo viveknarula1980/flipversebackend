@@ -25,11 +25,10 @@ const COINFLIP_PROGRAM_ID =
 let db = require("./db");
 global.db = db;
 
-// helpers
+// ---------- Helpers ----------
 function pctToBps(x) { const n = Math.max(0, Math.min(100, Number(x))); return Math.round(n * 100); }
 function normalizeHouseEdgePatch(patch) {
-  const he =
-    patch?.houseEdgePct ?? patch?.house_edge_pct ?? patch?.houseEdge ?? patch?.house_edge ?? undefined;
+  const he = patch?.houseEdgePct ?? patch?.house_edge_pct ?? patch?.houseEdge ?? patch?.house_edge ?? undefined;
   if (he == null || he === "") return null;
   const fee_bps = pctToBps(he);
   const rtp_bps = Math.max(0, 10000 - fee_bps);
@@ -52,10 +51,10 @@ function getClientIp(req) {
   return xf || req.ip || req.connection?.remoteAddress || "";
 }
 
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "https://flipverse-web.vercel.app";
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
 const PORT = Number(process.env.PORT || 4000);
 
-// ---------- PDA balance helpers (no changes to db.js required) ----------
+// ---------- PDA balance helpers ----------
 async function setAbsolutePdaBalance(wallet, sol) {
   const val = Number(sol) || 0;
   await db.pool.query(
@@ -66,7 +65,6 @@ async function setAbsolutePdaBalance(wallet, sol) {
     [String(wallet), val]
   );
 }
-
 async function adjustPdaBalance(wallet, deltaSol) {
   const delta = Number(deltaSol) || 0;
   await db.pool.query(
@@ -78,28 +76,24 @@ async function adjustPdaBalance(wallet, deltaSol) {
   );
 }
 
-
 async function main() {
-  try {
-    if (db.ensureSchema) await db.ensureSchema();
-  } catch (e) {
-    console.warn("[ensureSchema] failed:", e?.message || e);
-  }
+  try { if (db.ensureSchema) await db.ensureSchema(); } catch (e) { console.warn("[ensureSchema] failed:", e?.message || e); }
 
   const app = express();
   app.set("trust proxy", true);
 
-  const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS ||
-    "https://flipverse-web.vercel.app,http://127.0.0.1:3000")
+  // ---------- CORS (Frontend: localhost + Vercel) ----------
+  const defaultAllowed = ["http://localhost:3000", "https://flipverse-web.vercel.app"];
+  const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || defaultAllowed.join(","))
     .split(",")
-    .map((s) => s.trim())
+    .map(s => s.trim())
     .filter(Boolean);
 
   const corsOptions = {
     origin(origin, cb) {
-      if (!origin) return cb(null, true);
+      if (!origin) return cb(null, true); // allow server-to-server / curl
       const ok = ALLOW_ORIGINS.includes(origin);
-      return cb(ok ? null : new Error("CORS: origin not allowed"), ok);
+      return cb(ok ? null : new Error("CORS: origin not allowed: " + origin), ok);
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -109,8 +103,18 @@ async function main() {
   };
 
   app.use(cors(corsOptions));
-  app.options("*", cors(corsOptions));
-  app.use(bodyParser.json());
+  app.options("*", cors(corsOptions)); // preflight
+  app.use(bodyParser.json({ limit: "1mb" }));
+
+  // Optional small error handler for CORS errors → JSON (not HTML)
+  app.use((err, _req, res, next) => {
+    if (err && String(err.message || "").startsWith("CORS:")) {
+      return res.status(403).json({ error: err.message });
+    }
+    return next(err);
+  });
+
+  console.log("[CORS] Allowed origins:", ALLOW_ORIGINS);
 
   // ---------- Health ----------
   app.get("/health", (_req, res) => {
@@ -163,17 +167,20 @@ async function main() {
       );
       const affiliateWallet = aff[0]?.owner_wallet || null;
 
+      // Build landing url (always frontend site with ?ref=CODE)
+      const landing = `${SITE_URL.replace(/\/$/, "")}/?ref=${encodeURIComponent(codeUp)}`;
+
       if (affiliateWallet) {
         const ip = getClientIp(req);
         const ua = req.headers["user-agent"] ? String(req.headers["user-agent"]).slice(0, 1024) : null;
         const ref = req.get("referer") || null;
-        const landing = `${SITE_URL}/?ref=${encodeURIComponent(codeUp)}`;
-
-        await db.pool.query(
-          `insert into affiliate_link_clicks (code, affiliate_wallet, clicked_wallet, device_id, ip, user_agent, referer, landing_url)
-           values ($1,$2,NULL,NULL,$3,$4,$5,$6)`,
-          [codeUp, String(affiliateWallet), ip || null, ua, ref, landing]
-        );
+        try {
+          await db.pool.query(
+            `insert into affiliate_link_clicks (code, affiliate_wallet, clicked_wallet, device_id, ip, user_agent, referer, landing_url)
+             values ($1,$2,NULL,NULL,$3,$4,$5,$6)`,
+            [codeUp, String(affiliateWallet), ip || null, ua, ref, landing]
+          );
+        } catch (_) {} // ignore dedupe
         return res.redirect(302, landing);
       } else {
         return res.redirect(SITE_URL);
@@ -259,7 +266,6 @@ async function main() {
     try {
       const id = String(req.params.id);
       const patch = req.body || {};
-
       const derived = normalizeHouseEdgePatch(patch);
       const finalPatch = { ...patch };
       if (derived) {
@@ -270,7 +276,6 @@ async function main() {
         delete finalPatch.houseEdge;
         delete finalPatch.house_edge;
       }
-
       const updated = await db.upsertGameConfig(id, finalPatch);
       res.json({
         id: updated.game_key,
@@ -296,7 +301,6 @@ async function main() {
       const fee_bps = Math.round(Math.max(0, Math.min(100, Number(houseEdgePct))) * 100);
       const rtp_bps = Math.max(0, 10000 - fee_bps);
       const updated = await db.upsertGameConfig(id, { fee_bps, rtp_bps });
-
       res.json({
         id: updated.game_key,
         enabled: updated.enabled,
@@ -475,10 +479,7 @@ async function main() {
     }
   });
 
-  // ---------- Wallet activity endpoints (call these after on-chain tx confirms) ----------
-  // Body can be:
-  //  { amountSol?: number, amountLamports?: number }  -> record delta only
-  //  { pdaSol?: number, pdaLamports?: number }        -> set absolute PDA balance (preferred)
+  // ---------- Wallet activity endpoints ----------
   app.post("/wallets/:id/deposit", async (req, res) => {
     try {
       const id = String(req.params.id);
@@ -489,10 +490,8 @@ async function main() {
         return res.status(400).json({ error: "amountSol or amountLamports required (> 0)" });
       }
 
-      // 1) record activity
       await db.recordActivity({ user: id, action: "deposit", amount: deltaSol, tx_hash: txHash });
 
-      // 2) update PDA balance (absolute preferred, else relative add)
       if (pdaSol != null || pdaLamports != null) {
         const absSol = pdaSol != null ? Number(pdaSol) : Number(pdaLamports || 0) / 1e9;
         await setAbsolutePdaBalance(id, absSol);
@@ -516,10 +515,8 @@ async function main() {
         return res.status(400).json({ error: "amountSol or amountLamports required (> 0)" });
       }
 
-      // 1) record activity
       await db.recordActivity({ user: id, action: "withdraw", amount: deltaSol, tx_hash: txHash });
 
-      // 2) update PDA balance (absolute preferred, else relative subtract)
       if (pdaSol != null || pdaLamports != null) {
         const absSol = pdaSol != null ? Number(pdaSol) : Number(pdaLamports || 0) / 1e9;
         await setAbsolutePdaBalance(id, absSol);
@@ -533,7 +530,6 @@ async function main() {
     }
   });
 
-  // Optional: quick fetch for wallet activities (same data your UI already uses via /admin/users/:id/activities)
   app.get("/wallets/:id/activities", async (req, res) => {
     try {
       const id = String(req.params.id);
@@ -552,8 +548,7 @@ async function main() {
   try {
     const { attachBotFeed, attachBotAdmin } = require("./bot_engine");
     attachBotAdmin?.(app); // mounts /admin/bot/* endpoints
-    // Mount the simulated admin bot feed namespace
-    attachBotFeed?.(ioPlaceholder()); // we call it again after io exists (below) with real io
+    attachBotFeed?.(ioPlaceholder()); // placeholder; reattached with real io below
   } catch (e) {
     console.warn("bot_engine not found / failed to mount:", e?.message || e);
   }
@@ -566,14 +561,13 @@ async function main() {
       origin(origin, cb) {
         if (!origin) return cb(null, true);
         const ok = ALLOW_ORIGINS.includes(origin);
-        cb(ok ? null : new Error("CORS: origin not allowed"), ok);
+        cb(ok ? null : new Error("CORS: origin not allowed: " + origin), ok);
       },
       credentials: true,
       methods: ["GET", "POST"],
     },
   });
 
-  // give bot_engine a real io if it exposed attachBotFeed above
   try {
     const { attachBotFeed } = require("./bot_engine");
     attachBotFeed?.(io);
@@ -636,6 +630,7 @@ async function main() {
   }
 
   console.log("DATABASE_URL =", process.env.DATABASE_URL);
+
   try {
     const adminReferrals = require("./admin_referrals_router");
     app.use("/api/admin/referrals", adminReferrals);
@@ -651,17 +646,18 @@ async function main() {
     console.warn("rewards_router not found / failed to mount:", e?.message || e);
   }
 
+  try {
+    require("./vault_listener").start();
+  } catch (e) {
+    console.warn(e);
+  }
 
-  try { 
-  require("./vault_listener").start(); 
-} catch (e) { 
-  console.warn(e); 
-}
-
-const welcomeBonusRouter = require("./welcome_bonus_router");
-app.use("/promo/welcome", welcomeBonusRouter);
-
-
+  try {
+    const welcomeBonusRouter = require("./welcome_bonus_router");
+    app.use("/promo/welcome", welcomeBonusRouter);
+  } catch (e) {
+    console.warn("welcome_bonus_router not found / failed to mount:", e?.message || e);
+  }
 
   server.listen(PORT, () => {
     console.log(
@@ -669,7 +665,6 @@ app.use("/promo/welcome", welcomeBonusRouter);
     );
   });
 
-  // placeholder so we can call attachBotFeed before io exists, safely no-ops
   function ioPlaceholder() {
     return { of(){return this;}, on(){}, emit(){}, use(){} };
   }

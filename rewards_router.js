@@ -1,4 +1,4 @@
-// rewards_router.js
+// server/rewards_router.js
 const express = require("express");
 const router = express.Router();
 const path = require("path");
@@ -33,8 +33,8 @@ function rowRangeToApi(r) {
  */
 function rowLevelToApi(l, withRange = false) {
   const base = {
-    id: l.level_number,        // display id is the sequential level number
-    row_id: l.id,              // real db primary key
+    id: l.level_number, // display id is the sequential level number
+    row_id: l.id, // real db primary key
     range_id: l.range_id,
     level_number: l.level_number,
     title: l.title,
@@ -70,10 +70,7 @@ function rowLevelToApi(l, withRange = false) {
 async function resolveLevelPk(idOrNumber) {
   const n = Number(idOrNumber);
   if (!Number.isFinite(n)) return null;
-  const { rows } = await db.pool.query(
-    `select id from levels where id = $1 or level_number = $1 limit 1`,
-    [n]
-  );
+  const { rows } = await db.pool.query(`select id from levels where id = $1 or level_number = $1 limit 1`, [n]);
   return rows[0]?.id ?? null;
 }
 
@@ -169,8 +166,7 @@ router.get("/admin/ranges", async (_req, res) => {
 router.post("/admin/ranges", async (req, res) => {
   try {
     const { name, quote, image = null, isActive = true } = req.body || {};
-    if (!name || !quote)
-      return res.status(400).json({ error: "name and quote required" });
+    if (!name || !quote) return res.status(400).json({ error: "name and quote required" });
     const { rows } = await db.pool.query(
       `insert into ranges(name, quote, image, is_active)
        values ($1,$2,$3,$4)
@@ -246,10 +242,9 @@ router.get("/admin/levels", async (_req, res) => {
 router.get("/admin/ranges/:rangeId/levels", async (req, res) => {
   try {
     const rangeId = Number(req.params.rangeId);
-    const { rows } = await db.pool.query(
-      `select * from levels where range_id=$1 order by level_number asc`,
-      [rangeId]
-    );
+    const { rows } = await db.pool.query(`select * from levels where range_id=$1 order by level_number asc`, [
+      rangeId,
+    ]);
     res.json(rows.map((r) => rowLevelToApi(r, false)));
   } catch (e) {
     res.status(500).json({ error: e?.message || String(e) });
@@ -258,32 +253,15 @@ router.get("/admin/ranges/:rangeId/levels", async (req, res) => {
 
 router.post("/admin/levels", async (req, res) => {
   try {
-    const {
-      range_id,
-      level_number,
-      title,
-      reward = null,
-      wagering = null,
-      bonus = null,
-      isActive = true,
-    } = req.body || {};
+    const { range_id, level_number, title, reward = null, wagering = null, bonus = null, isActive = true } =
+      req.body || {};
     if (!range_id || !level_number || !title)
-      return res
-        .status(400)
-        .json({ error: "range_id, level_number, title required" });
+      return res.status(400).json({ error: "range_id, level_number, title required" });
     const { rows } = await db.pool.query(
       `insert into levels (range_id, level_number, title, reward, wagering, bonus, is_active)
        values ($1,$2,$3,$4,$5,$6,$7)
        returning *`,
-      [
-        Number(range_id),
-        Number(level_number),
-        String(title),
-        reward,
-        wagering,
-        bonus,
-        toBool(isActive),
-      ]
+      [Number(range_id), Number(level_number), String(title), reward, wagering, bonus, toBool(isActive)]
     );
     res.json(rowLevelToApi(rows[0]));
   } catch (e) {
@@ -299,8 +277,7 @@ router.put("/admin/levels/:id", async (req, res) => {
     const resolvedId = await resolveLevelPk(req.params.id);
     if (!resolvedId) return res.status(404).json({ error: "level not found" });
 
-    const { range_id, level_number, title, reward, wagering, bonus, isActive } =
-      req.body || {};
+    const { range_id, level_number, title, reward, wagering, bonus, isActive } = req.body || {};
     const { rows } = await db.pool.query(
       `update levels set
          range_id     = coalesce($2, range_id),
@@ -345,7 +322,7 @@ router.delete("/admin/levels/:id", async (req, res) => {
   }
 });
 
-/* ===================== PUBLIC: Ranges & Levels (fix 404) ===================== */
+/* ===================== PUBLIC: Ranges & Levels ===================== */
 router.get("/rewards/ranges", async (_req, res) => {
   try {
     const { rows } = await db.pool.query(
@@ -383,10 +360,7 @@ router.get("/rewards/users/:userId/progress", async (req, res) => {
     const userId = String(req.params.userId);
 
     // claimed
-    const { rows: claimed } = await db.pool.query(
-      `select level_id from reward_claims where user_id=$1`,
-      [userId]
-    );
+    const { rows: claimed } = await db.pool.query(`select level_id from reward_claims where user_id=$1`, [userId]);
     const claimedSet = new Set(claimed.map((r) => Number(r.level_id)));
 
     // all levels
@@ -411,23 +385,16 @@ router.get("/rewards/users/:userId/progress", async (req, res) => {
       }
     }
 
-    const currentLevel =
-      levels.find((l) => l.level_number === highestClaimedNum) || null;
-    const nextLevel =
-      levels.find((l) => l.level_number > (currentLevel?.level_number || 0)) ||
-      null;
+    const currentLevel = levels.find((l) => l.level_number === highestClaimedNum) || null;
+    const nextLevel = levels.find((l) => l.level_number > (currentLevel?.level_number || 0)) || null;
 
     // current range = from currentLevel or nextLevel
     let currentRange = null;
     if (currentLevel) {
-      const r = await db.pool.query(`select * from ranges where id=$1`, [
-        currentLevel.range_id,
-      ]);
+      const r = await db.pool.query(`select * from ranges where id=$1`, [currentLevel.range_id]);
       currentRange = r.rows[0] ? rowRangeToApi(r.rows[0]) : null;
     } else if (nextLevel) {
-      const r = await db.pool.query(`select * from ranges where id=$1`, [
-        nextLevel.range_id,
-      ]);
+      const r = await db.pool.query(`select * from ranges where id=$1`, [nextLevel.range_id]);
       currentRange = r.rows[0] ? rowRangeToApi(r.rows[0]) : null;
     }
 
@@ -442,9 +409,7 @@ router.get("/rewards/users/:userId/progress", async (req, res) => {
       currentWagered: +currentWagered.toFixed(2),
       currentLevel: currentLevel ? rowLevelToApi(currentLevel) : null,
       nextLevel: nextLevel ? rowLevelToApi(nextLevel) : null,
-      claimedLevels: levels
-        .filter((l) => claimedSet.has(l.id))
-        .map((l) => l.level_number),
+      claimedLevels: levels.filter((l) => claimedSet.has(l.id)).map((l) => l.level_number),
       availableToClaim,
       currentRange,
       totalRewardsPaid: Number(paid[0].s || 0),
@@ -460,24 +425,20 @@ router.get("/rewards/users/:userId/progress", async (req, res) => {
 router.post("/rewards/claim", async (req, res) => {
   try {
     const { userId, levelId } = req.body || {};
-    if (!userId || !levelId)
-      return res.status(400).json({ error: "userId and levelId required" });
+    if (!userId || !levelId) return res.status(400).json({ error: "userId and levelId required" });
 
     const resolvedId = await resolveLevelPk(levelId);
     if (!resolvedId) return res.status(404).json({ error: "level not found" });
 
-    const { rows: lvRows } = await db.pool.query(
-      `select * from levels where id=$1`,
-      [resolvedId]
-    );
+    const { rows: lvRows } = await db.pool.query(`select * from levels where id=$1`, [resolvedId]);
     const lv = lvRows[0];
     if (!lv) return res.status(404).json({ error: "level not found" });
 
     // check not already claimed
-    const dup = await db.pool.query(
-      `select 1 from reward_claims where user_id=$1 and level_id=$2 limit 1`,
-      [String(userId), resolvedId]
-    );
+    const dup = await db.pool.query(`select 1 from reward_claims where user_id=$1 and level_id=$2 limit 1`, [
+      String(userId),
+      resolvedId,
+    ]);
     if (dup.rows.length) return res.status(400).json({ error: "already claimed" });
 
     // check wagering requirement
@@ -506,7 +467,7 @@ router.post("/rewards/claim", async (req, res) => {
       claimedAt: rows[0].claimed_at,
       transactionId: rows[0].transaction_id,
       level: {
-        id: lv.level_number,        // expose sequential id here too
+        id: lv.level_number, // expose sequential id here too
         row_id: lv.id,
         level_number: lv.level_number,
         title: lv.title,
@@ -530,7 +491,11 @@ router.get("/admin/rewards/claims", async (req, res) => {
     const where = [];
     if (levelId) {
       // accept DB id OR level_number filter
-      where.push(`(rc.level_id = $${params.length + 1} or rc.level_id in (select id from levels where level_number=$${params.length + 1}))`);
+      where.push(
+        `(rc.level_id = $${params.length + 1} or rc.level_id in (select id from levels where level_number=$${
+          params.length + 1
+        }))`
+      );
       params.push(levelId);
     }
     if (userId) {
@@ -541,10 +506,7 @@ router.get("/admin/rewards/claims", async (req, res) => {
 
     const off = (page - 1) * limit;
 
-    const cnt = await db.pool.query(
-      `select count(*)::int as c from reward_claims rc ${whereSql}`,
-      params
-    );
+    const cnt = await db.pool.query(`select count(*)::int as c from reward_claims rc ${whereSql}`, params);
     const total = Number(cnt.rows[0].c || 0);
 
     const rows = await db.pool.query(
@@ -567,7 +529,7 @@ router.get("/admin/rewards/claims", async (req, res) => {
         claimedAt: r.claimed_at,
         transactionId: r.transaction_id,
         level: {
-          id: r.level_number,    // show sequential id here too
+          id: r.level_number, // show sequential id here too
           row_id: r.level_id,
           level_number: r.level_number,
           title: r.title,
@@ -611,12 +573,19 @@ async function aggregateWageredLamportsMap() {
     for (const r of rows) add(r.wallet, r.s || "0");
   }
 
+  // coinflip: attribute 2*bet to both A and B (matches per-user calc)
   if (await db._tableExistsUnsafe?.("coinflip_matches")) {
-    const { rows } = await db.pool.query(
+    const aRows = await db.pool.query(
       `select player_a as wallet, coalesce(sum(bet_lamports*2),0)::text as s
          from coinflip_matches group by player_a`
     );
-    for (const r of rows) add(r.wallet, r.s || "0");
+    for (const r of aRows.rows) add(r.wallet, r.s || "0");
+
+    const bRows = await db.pool.query(
+      `select player_b as wallet, coalesce(sum(bet_lamports*2),0)::text as s
+         from coinflip_matches group by player_b`
+    );
+    for (const r of bRows.rows) add(r.wallet, r.s || "0");
   }
 
   if (await db._tableExistsUnsafe?.("slots_spins")) {
@@ -628,6 +597,71 @@ async function aggregateWageredLamportsMap() {
   }
 
   return map;
+}
+
+/** Windowed variant used for 7d ranks */
+async function aggregateWageredLamportsMapWindow(start, end = null) {
+  const map = new Map(); // wallet -> BigInt lamports
+  const s = new Date(start);
+  const e = end ? new Date(end) : new Date();
+
+  function add(wallet, lam) {
+    if (!wallet) return;
+    const cur = map.get(wallet) || 0n;
+    map.set(wallet, cur + BigInt(lam));
+  }
+
+  if (await db._tableExistsUnsafe?.("game_rounds")) {
+    const { rows } = await db.pool.query(
+      `select player as wallet, coalesce(sum(stake_lamports),0)::text as s
+         from game_rounds
+        where created_at >= $1 and created_at < $2
+        group by player`,
+      [s, e]
+    );
+    for (const r of rows) add(r.wallet, r.s || "0");
+  }
+
+  if (await db._tableExistsUnsafe?.("coinflip_matches")) {
+    const aRows = await db.pool.query(
+      `select player_a as wallet, coalesce(sum(bet_lamports*2),0)::text as s
+         from coinflip_matches
+        where created_at >= $1 and created_at < $2
+        group by player_a`,
+      [s, e]
+    );
+    for (const r of aRows.rows) add(r.wallet, r.s || "0");
+
+    const bRows = await db.pool.query(
+      `select player_b as wallet, coalesce(sum(bet_lamports*2),0)::text as s
+         from coinflip_matches
+        where created_at >= $1 and created_at < $2
+        group by player_b`,
+      [s, e]
+    );
+    for (const r of bRows.rows) add(r.wallet, r.s || "0");
+  }
+
+  if (await db._tableExistsUnsafe?.("slots_spins")) {
+    const { rows } = await db.pool.query(
+      `select player as wallet, coalesce(sum(bet_amount),0)::text as s
+         from slots_spins
+        where created_at >= $1 and created_at < $2
+        group by player`,
+      [s, e]
+    );
+    for (const r of rows) add(r.wallet, r.s || "0");
+  }
+
+  return map;
+}
+
+function rankFromMap(map, wallet) {
+  const all = Array.from(map.entries()).map(([w, lam]) => ({ w, lam: BigInt(lam) }));
+  if (!all.length) return { rank: null, players: 0 };
+  all.sort((a, b) => (a.lam < b.lam ? 1 : a.lam > b.lam ? -1 : 0));
+  const idx = all.findIndex((r) => r.w === wallet);
+  return { rank: idx === -1 ? null : idx + 1, players: all.length };
 }
 
 router.get("/leaderboard/top", async (req, res) => {
@@ -642,10 +676,8 @@ router.get("/leaderboard/top", async (req, res) => {
       total_wagered_usd: lamportsToUsd(BigInt(lam)),
     }));
 
-    // IMPORTANT: return a numeric comparator (avoid BigInt subtraction)
-    all.sort((a, b) =>
-      a.wager_lamports < b.wager_lamports ? 1 : a.wager_lamports > b.wager_lamports ? -1 : 0
-    );
+    // sort by lamports desc (avoid BigInt subtraction)
+    all.sort((a, b) => (a.wager_lamports < b.wager_lamports ? 1 : a.wager_lamports > b.wager_lamports ? -1 : 0));
 
     const top = all.slice(0, limit);
     if (!top.length) return res.json([]);
@@ -653,13 +685,10 @@ router.get("/leaderboard/top", async (req, res) => {
     const wallets = top.map((t) => t.wallet);
 
     // 2) usernames from app_users
-    const { rows: users } = await db.pool.query(
-      `select user_id, username from app_users where user_id = any($1)`,
-      [wallets]
-    );
-    const nameByWallet = Object.fromEntries(
-      users.map((u) => [u.user_id, u.username || u.user_id])
-    );
+    const { rows: users } = await db.pool.query(`select user_id, username from app_users where user_id = any($1)`, [
+      wallets,
+    ]);
+    const nameByWallet = Object.fromEntries(users.map((u) => [u.user_id, u.username || u.user_id]));
 
     // 3) highest claimed level per wallet (+ range name)
     const { rows: levelRows } = await db.pool.query(
@@ -704,14 +733,64 @@ router.get("/leaderboard/top", async (req, res) => {
         current_level_number: lvl?.level_number ?? null,
         current_level_title: lvl?.level_title ?? null,
         current_range_name: lvl?.range_name ?? null,
-        current_level_label:
-          lvl?.range_name && lvl?.level_title
-            ? `${lvl.range_name} - ${lvl.level_title}`
-            : "UNRANKED",
+        current_level_label: lvl?.range_name && lvl?.level_title ? `${lvl.range_name} - ${lvl.level_title}` : "UNRANKED",
       };
     });
 
     res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+/* ===================== PUBLIC: Me (Best Rank / Change / Players) ===================== */
+/**
+ * GET /leaderboard/me?wallet=<pubkey>
+ * Returns:
+ * {
+ *   wallet,
+ *   bestRank,       // all-time global rank by total wagering
+ *   currentRank7d,  // rank in last 7 days
+ *   prevRank7d,     // rank in the prior 7-day window
+ *   change,         // prevRank7d - currentRank7d (positive => improved)
+ *   players,        // all-time distinct wallets with any wagering
+ *   players7d       // distinct wallets in the last 7 days
+ * }
+ */
+router.get("/leaderboard/me", async (req, res) => {
+  try {
+    const wallet = String(req.query.wallet || "").trim();
+    if (!wallet) return res.status(400).json({ error: "wallet required" });
+
+    // All-time
+    const allMap = await aggregateWageredLamportsMap();
+    const { rank: bestRank, players } = rankFromMap(allMap, wallet);
+
+    // 7d windows
+    const now = new Date();
+    const start7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const start14d = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+
+    const m7 = await aggregateWageredLamportsMapWindow(start7d, now);
+    const mPrev7 = await aggregateWageredLamportsMapWindow(start14d, start7d);
+
+    const { rank: currentRank7d, players: players7d } = rankFromMap(m7, wallet);
+    const { rank: prevRank7d } = rankFromMap(mPrev7, wallet);
+
+    let change = null;
+    if (currentRank7d != null && prevRank7d != null) {
+      change = prevRank7d - currentRank7d; // positive => moved up (e.g., +14)
+    }
+
+    res.json({
+      wallet,
+      bestRank,
+      currentRank7d,
+      prevRank7d,
+      change,
+      players,
+      players7d,
+    });
   } catch (e) {
     res.status(500).json({ error: e?.message || String(e) });
   }
