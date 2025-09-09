@@ -18,7 +18,8 @@ async function ensureSchema() {
 async function ensureAccountingExtensions() {
   // helper to add a column if missing
   async function ensureColumn(table, column, typeSql) {
-    await pool.query(`
+    await pool.query(
+      `
       do $$
       begin
         if not exists (
@@ -28,7 +29,9 @@ async function ensureAccountingExtensions() {
           execute format('alter table public.%I add column %I ${typeSql}', $1, $2);
         end if;
       end$$;
-    `, [table, column]);
+    `,
+      [table, column]
+    );
   }
 
   // deposits: add amount_sol, usd_at_tx, price_usd_per_sol (if not present)
@@ -52,12 +55,16 @@ const big = (v) => (v == null ? null : String(v));
 
 // Small helper to check if a relation exists (schema-qualified or not)
 async function tableExists(name) {
-  const { rows } = await pool.query(`select to_regclass($1) as r`, [name.includes(".") ? name : `public.${name}`]);
+  const { rows } = await pool.query(`select to_regclass($1) as r`, [
+    name.includes(".") ? name : `public.${name}`,
+  ]);
   return !!rows[0]?.r;
 }
 
 // intentionally exported (used by server metrics)
-async function _tableExistsUnsafe(name) { return tableExists(name); }
+async function _tableExistsUnsafe(name) {
+  return tableExists(name);
+}
 
 // -------------------- rules (global RTP/min/max fallback) --------------------
 async function getRules() {
@@ -187,9 +194,17 @@ async function recordGameRound({
  * Record activity; amount is in SOL by convention.
  * Optionally carries amount_usd and price_usd_per_sol (columns added by ensureAccountingExtensions()).
  */
-async function recordActivity({ user, action, amount, amount_usd = null, price_usd_per_sol = null }) {
+async function recordActivity({
+  user,
+  action,
+  amount,
+  amount_usd = null,
+  price_usd_per_sol = null,
+}) {
   // ensure optional columns exist (best effort, no throw)
-  try { if (ensureAccountingExtensions) await ensureAccountingExtensions(); } catch {}
+  try {
+    if (ensureAccountingExtensions) await ensureAccountingExtensions();
+  } catch {}
 
   // figure out whether the optional columns exist
   const hasActUsd = await _hasActivityUsdCols();
@@ -198,7 +213,13 @@ async function recordActivity({ user, action, amount, amount_usd = null, price_u
     await pool.query(
       `insert into activities (user_addr, action, amount, amount_usd, price_usd_per_sol)
        values ($1,$2,$3,$4,$5)`,
-      [String(user), String(action), Number(amount), amount_usd != null ? Number(amount_usd) : null, price_usd_per_sol != null ? Number(price_usd_per_sol) : null]
+      [
+        String(user),
+        String(action),
+        Number(amount),
+        amount_usd != null ? Number(amount_usd) : null,
+        price_usd_per_sol != null ? Number(price_usd_per_sol) : null,
+      ]
     );
   } else {
     await pool.query(
@@ -220,7 +241,7 @@ async function _hasActivityUsdCols() {
   const { rows } = await pool.query(
     `select column_name from information_schema.columns where table_schema='public' and table_name='activities'`
   );
-  const cols = rows.map(r => r.column_name);
+  const cols = rows.map((r) => r.column_name);
   _actHasUsdCols = cols.includes("amount_usd") && cols.includes("price_usd_per_sol");
   _actColsChecked = true;
   return _actHasUsdCols;
@@ -299,28 +320,52 @@ async function getAdminStats() {
 
   // total volume = sum of stakes (game_rounds + 2*coinflip stake per match)
   const vol1 = hasGR
-    ? (await pool.query(`select coalesce(sum(stake_lamports),0)::text as v from game_rounds`)).rows[0].v
+    ? (
+        await pool.query(
+          `select coalesce(sum(stake_lamports),0)::text as v from game_rounds`
+        )
+      ).rows[0].v
     : "0";
   const vol2 = hasCF
-    ? (await pool.query(`select coalesce(sum(bet_lamports)*2,0)::text as v from coinflip_matches`)).rows[0].v
+    ? (
+        await pool.query(
+          `select coalesce(sum(bet_lamports)*2,0)::text as v from coinflip_matches`
+        )
+      ).rows[0].v
     : "0";
 
   // revenue ~ stakes - payouts
   const rev1 = hasGR
-    ? (await pool.query(`select coalesce(sum(stake_lamports - payout_lamports),0)::text as v from game_rounds`)).rows[0].v
+    ? (
+        await pool.query(
+          `select coalesce(sum(stake_lamports - payout_lamports),0)::text as v from game_rounds`
+        )
+      ).rows[0].v
     : "0";
   const rev2 = hasCF
-    ? (await pool.query(`select coalesce(sum((bet_lamports*2) - payout_lamports),0)::text as v from coinflip_matches`)).rows[0].v
+    ? (
+        await pool.query(
+          `select coalesce(sum((bet_lamports*2) - payout_lamports),0)::text as v from coinflip_matches`
+        )
+      ).rows[0].v
     : "0";
 
   // today revenue
   const today1 = hasGR
-    ? (await pool.query(`select coalesce(sum(stake_lamports - payout_lamports),0)::text as v
-                         from game_rounds where created_at::date = now()::date`)).rows[0].v
+    ? (
+        await pool.query(
+          `select coalesce(sum(stake_lamports - payout_lamports),0)::text as v
+           from game_rounds where created_at::date = now()::date`
+        )
+      ).rows[0].v
     : "0";
   const today2 = hasCF
-    ? (await pool.query(`select coalesce(sum((bet_lamports*2) - payout_lamports),0)::text as v
-                         from coinflip_matches where created_at::date = now()::date`)).rows[0].v
+    ? (
+        await pool.query(
+          `select coalesce(sum((bet_lamports*2) - payout_lamports),0)::text as v
+           from coinflip_matches where created_at::date = now()::date`
+        )
+      ).rows[0].v
     : "0";
 
   const totalVolume = BigInt(vol1) + BigInt(vol2);
@@ -329,10 +374,22 @@ async function getAdminStats() {
 
   // users (distinct addresses)
   const users1 = hasGR
-    ? Number((await pool.query(`select count(distinct player) as c from game_rounds`)).rows[0].c)
+    ? Number(
+        (
+          await pool.query(
+            `select count(distinct player) as c from game_rounds`
+          )
+        ).rows[0].c
+      )
     : 0;
   const users2 = hasCF
-    ? Number((await pool.query(`select count(distinct player_a) + count(distinct player_b) as c from coinflip_matches`)).rows[0].c)
+    ? Number(
+        (
+          await pool.query(
+            `select count(distinct player_a) + count(distinct player_b) as c from coinflip_matches`
+          )
+        ).rows[0].c
+      )
     : 0;
 
   const totalUsers = users1 + users2;
@@ -340,10 +397,12 @@ async function getAdminStats() {
   // last 10 activities (optional table)
   const hasAct = await tableExists("activities");
   const actRows = hasAct
-    ? (await pool.query(
-        `select user_addr as "user", action, amount::text, to_char(created_at,'YYYY-MM-DD HH24:MI') as time
-         from activities order by id desc limit 10`
-      )).rows
+    ? (
+        await pool.query(
+          `select user_addr as "user", action, amount::text, to_char(created_at,'YYYY-MM-DD HH24:MI') as time
+           from activities order by id desc limit 10`
+        )
+      ).rows
     : [];
 
   return {
@@ -398,7 +457,12 @@ async function updatePdaBalance(user_id, pda_balance_lamports) {
   );
 }
 
-async function listUsers({ page = 1, limit = 20, status = "all", search = "" } = {}) {
+async function listUsers({
+  page = 1,
+  limit = 20,
+  status = "all",
+  search = "",
+} = {}) {
   const hasUsers = await tableExists("app_users");
   if (!hasUsers) {
     return { users: [], total: 0, pages: 1 };
@@ -414,7 +478,9 @@ async function listUsers({ page = 1, limit = 20, status = "all", search = "" } =
   }
   if (search) {
     vals.push(`%${search}%`);
-    where.push(`(u.username ilike $${vals.length} or u.user_id ilike $${vals.length})`);
+    where.push(
+      `(u.username ilike $${vals.length} or u.user_id ilike $${vals.length})`
+    );
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
 
@@ -447,7 +513,10 @@ async function listUsers({ page = 1, limit = 20, status = "all", search = "" } =
     ${whereSql}
   `;
 
-  const countRes = await pool.query(`select count(*)::int as c from app_users u ${whereSql}`, vals);
+  const countRes = await pool.query(
+    `select count(*)::int as c from app_users u ${whereSql}`,
+    vals
+  );
   const total = Number(countRes.rows[0]?.c || 0);
 
   const rows = await pool.query(
@@ -469,7 +538,10 @@ async function listUsers({ page = 1, limit = 20, status = "all", search = "" } =
       const totalBets = Number(r.total_bets || 0);
       const totalWins = Number(r.total_wins || 0);
       const totalLosses = Math.max(0, totalBets - totalWins);
-      const winRate = totalBets > 0 ? Number(((totalWins / totalBets) * 100).toFixed(1)) : 0;
+      const winRate =
+        totalBets > 0
+          ? Number(((totalWins / totalBets) * 100).toFixed(1))
+          : 0;
       return {
         id: r.user_id,
         username: r.username,
@@ -665,27 +737,47 @@ async function _transactionsCteDynamic() {
 /**
  * List admin transactions with pagination + filters
  */
-async function listTransactions({ page=1, limit=20, type='all', status='all', game='all', search='' } = {}) {
-  const off  = Math.max(0, (Number(page)-1) * Number(limit));
+async function listTransactions({
+  page = 1,
+  limit = 20,
+  type = "all",
+  status = "all",
+  game = "all",
+  search = "",
+} = {}) {
+  const off = Math.max(0, (Number(page) - 1) * Number(limit));
   const vals = [];
   const where = [];
 
-  if (type && type !== 'all')   { vals.push(type);   where.push(`t.type = $${vals.length}`); }
-  if (status && status !== 'all'){ vals.push(status); where.push(`t.status = $${vals.length}`); }
-  if (game && game !== 'all')   { vals.push(game);   where.push(`t.game = $${vals.length}`); }
+  if (type && type !== "all") {
+    vals.push(type);
+    where.push(`t.type = $${vals.length}`);
+  }
+  if (status && status !== "all") {
+    vals.push(status);
+    where.push(`t.status = $${vals.length}`);
+  }
+  if (game && game !== "all") {
+    vals.push(game);
+    where.push(`t.game = $${vals.length}`);
+  }
   const hasUsers = await tableExists("app_users");
   if (search) {
     vals.push(`%${search}%`);
     if (hasUsers) {
-      where.push(`(u.username ilike $${vals.length} or t.wallet ilike $${vals.length})`);
+      where.push(
+        `(u.username ilike $${vals.length} or t.wallet ilike $${vals.length})`
+      );
     } else {
       where.push(`(t.wallet ilike $${vals.length})`);
     }
   }
-  const whereSql = where.length ? `where ${where.join(' and ')}` : '';
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
 
   const cte = await _transactionsCteDynamic();
-  const joinUsers = hasUsers ? `left join app_users u on u.user_id = t.wallet` : `left join (select null) u on false`;
+  const joinUsers = hasUsers
+    ? `left join app_users u on u.user_id = t.wallet`
+    : `left join (select null) u on false`;
 
   const base = `
     ${cte}
@@ -713,12 +805,12 @@ async function listTransactions({ page=1, limit=20, type='all', status='all', ga
 
   // page
   const rows = await pool.query(
-    `${base} order by t.created_at desc limit $${vals.length+1} offset $${vals.length+2}`,
-    vals.concat([ Number(limit), off ])
+    `${base} order by t.created_at desc limit $${vals.length + 1} offset $${vals.length + 2}`,
+    vals.concat([Number(limit), off])
   );
 
   return {
-    transactions: rows.rows.map(r => ({
+    transactions: rows.rows.map((r) => ({
       id: Number(r.id),
       username: r.username,
       walletAddress: r.walletAddress,
@@ -765,35 +857,92 @@ async function getTransactionStats() {
  */
 async function updateTransactionStatusComposite(compositeId, newStatus) {
   const bigId = BigInt(compositeId);
-  const source  = Number(bigId / 1000000000n);
+  const source = Number(bigId / 1000000000n);
   const real_id = Number(bigId % 1000000000n);
 
-  if (!['string','number'].includes(typeof newStatus) || String(newStatus).length === 0) {
-    throw new Error('invalid status');
+  if (
+    !["string", "number"].includes(typeof newStatus) ||
+    String(newStatus).length === 0
+  ) {
+    throw new Error("invalid status");
   }
 
   if (source === 1) {
     if (!(await tableExists("bets"))) throw new Error("bets table missing");
-    const q = await pool.query(`update bets set status=$1 where id=$2`, [ String(newStatus), Number(real_id) ]);
-    if (q.rowCount === 0) throw new Error('Transaction not found');
+    const q = await pool.query(`update bets set status=$1 where id=$2`, [
+      String(newStatus),
+      Number(real_id),
+    ]);
+    if (q.rowCount === 0) throw new Error("Transaction not found");
     return { ok: true };
   }
   if (source === 4) {
-    if (!(await tableExists("slots_spins"))) throw new Error("slots_spins table missing");
-    const q = await pool.query(`update slots_spins set status=$1 where id=$2`, [ String(newStatus), Number(real_id) ]);
-    if (q.rowCount === 0) throw new Error('Transaction not found');
+    if (!(await tableExists("slots_spins")))
+      throw new Error("slots_spins table missing");
+    const q = await pool.query(`update slots_spins set status=$1 where id=$2`, [
+      String(newStatus),
+      Number(real_id),
+    ]);
+    if (q.rowCount === 0) throw new Error("Transaction not found");
     return { ok: true };
   }
-  throw new Error('Status update not supported for this transaction type');
+  throw new Error("Status update not supported for this transaction type");
+}
+
+/**
+ * Insert a deposit row.
+ * Accepts lamports and optional SOL/USD details.
+ */
+async function recordDeposit({
+  user_wallet,
+  amount_lamports,
+  tx_sig = null,
+  amount_sol = null,
+  usd_at_tx = null,
+  price_usd_per_sol = null,
+}) {
+  try {
+    if (ensureAccountingExtensions) await ensureAccountingExtensions();
+  } catch {}
+
+  const sol =
+    amount_sol == null
+      ? Number(amount_lamports || 0) / 1e9
+      : Number(amount_sol || 0);
+
+  await pool.query(
+    `insert into deposits (user_wallet, amount_lamports, amount_sol, usd_at_tx, price_usd_per_sol, tx_sig)
+     values ($1,$2,$3,$4,$5,$6)`,
+    [
+      String(user_wallet),
+      big(amount_lamports || 0),
+      Number(sol || 0),
+      usd_at_tx == null ? null : Number(usd_at_tx),
+      price_usd_per_sol == null ? null : Number(price_usd_per_sol),
+      tx_sig == null ? null : String(tx_sig),
+    ]
+  );
+  // keep app_users active
+  await upsertAppUserLastActive(String(user_wallet));
+  return { ok: true };
 }
 
 /**
  * Annotate a deposit row (matched by tx_sig) with SOL + USD information.
  * If no row matches (e.g., API insert didn't happen), we insert a new row.
  */
-async function annotateDepositBySig({ tx_sig, user_wallet, amount_lamports, amount_sol, usd_at_tx, price_usd_per_sol }) {
+async function annotateDepositBySig({
+  tx_sig,
+  user_wallet,
+  amount_lamports,
+  amount_sol,
+  usd_at_tx,
+  price_usd_per_sol,
+}) {
   // ensure columns exist (best effort)
-  try { if (ensureAccountingExtensions) await ensureAccountingExtensions(); } catch {}
+  try {
+    if (ensureAccountingExtensions) await ensureAccountingExtensions();
+  } catch {}
 
   // Try to update by tx_sig first
   const upd = await pool.query(
@@ -802,7 +951,12 @@ async function annotateDepositBySig({ tx_sig, user_wallet, amount_lamports, amou
            usd_at_tx = $3,
            price_usd_per_sol = $4
      where tx_sig = $1`,
-    [ String(tx_sig || ""), Number(amount_sol || 0), Number(usd_at_tx || 0), Number(price_usd_per_sol || 0) ]
+    [
+      String(tx_sig || ""),
+      Number(amount_sol || 0),
+      Number(usd_at_tx || 0),
+      Number(price_usd_per_sol || 0),
+    ]
   );
 
   if (upd.rowCount > 0) return { ok: true, updated: true };
@@ -820,6 +974,8 @@ async function annotateDepositBySig({ tx_sig, user_wallet, amount_lamports, amou
       String(tx_sig || ""),
     ]
   );
+  // keep app_users active
+  await upsertAppUserLastActive(String(user_wallet));
   return { ok: true, inserted: true };
 }
 
@@ -850,7 +1006,7 @@ module.exports = {
   updateUserStatus,
   listUserActivities,
   upsertAppUserLastActive,
-  updatePdaBalance,   // export
+  updatePdaBalance,
 
   // bans
   isUserBanned,
@@ -861,7 +1017,8 @@ module.exports = {
   getTransactionStats,
   updateTransactionStatusComposite,
 
-  // deposits USD annotation
+  // deposits
+  recordDeposit,
   annotateDepositBySig,
 
   // internal

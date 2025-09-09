@@ -137,6 +137,34 @@ function userVaultPda(player) {
   )[0];
 }
 
+/**
+ * Resolve an instruction account (which might be an index) to a base58 pubkey string.
+ * Works for both top-level and inner instructions from getParsedTransaction().
+ */
+function accountIndexToBase58(tx, ixAccount) {
+  // Already a PublicKey-like?
+  if (ixAccount && typeof ixAccount === "object") {
+    if (typeof ixAccount.toBase58 === "function") return ixAccount.toBase58();
+    if (ixAccount.pubkey) {
+      const pk = ixAccount.pubkey;
+      return typeof pk.toBase58 === "function" ? pk.toBase58() : String(pk);
+    }
+  }
+  // If it's a string, assume it's already base58
+  if (typeof ixAccount === "string") return ixAccount;
+
+  // Number index -> look up in message.accountKeys
+  if (typeof ixAccount === "number") {
+    const keys = tx?.transaction?.message?.accountKeys || [];
+    const entry = keys[ixAccount];
+    if (!entry) return "";
+    const pk = entry.pubkey ?? entry; // ParsedMessageAccount or PublicKey
+    return typeof pk.toBase58 === "function" ? pk.toBase58() : String(pk);
+  }
+
+  return String(ixAccount || "");
+}
+
 /** Best-effort extraction of all program-owned instructions (top-level + inner) */
 function collectProgramInstructions(tx, programIdStr) {
   const out = [];
@@ -218,7 +246,8 @@ async function handleSignature(sig, connection) {
       const decoded = decodeIxDataBase58(dataB58);
       if (!decoded) continue;
 
-      const playerStr = String(accs[ACCOUNT_INDEX.player] || "");
+      // FIX: resolve account index -> base58 wallet
+      const playerStr = accountIndexToBase58(tx, accs[ACCOUNT_INDEX.player]);
       if (!playerStr) continue;
 
       const pda = userVaultPda(playerStr);
@@ -256,7 +285,7 @@ async function handleSignature(sig, connection) {
             amountSol,
             txSig: sig,
           }).finally(async () => {
-            // annotate the deposits row with SOL + USD
+            // annotate (or insert) the deposits row with SOL + USD
             try {
               await db.annotateDepositBySig({
                 tx_sig: sig,

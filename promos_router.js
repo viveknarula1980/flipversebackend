@@ -1359,13 +1359,86 @@ router.get("/affiliates/me/games", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 
-// Activity feed
+// ---- NEW: wager aggregation helper for Activity feed ----
+async function _wageredCteForReferrals(db) {
+  const parts = [];
+
+  if (await db._tableExistsUnsafe?.("game_rounds")) {
+    parts.push(`
+      select player as wallet,
+             sum(stake_lamports)::bigint as amount,
+             max(created_at) as last_ts
+      from game_rounds
+      group by player
+    `);
+  }
+
+  if (await db._tableExistsUnsafe?.("bets")) {
+    parts.push(`
+      select player as wallet,
+             sum(bet_amount_lamports)::bigint as amount,
+             max(created_at) as last_ts
+      from bets
+      group by player
+    `);
+  }
+
+  if (await db._tableExistsUnsafe?.("coinflip_matches")) {
+    parts.push(`
+      select player_a as wallet,
+             sum(bet_lamports*2)::bigint as amount,
+             max(created_at) as last_ts
+      from coinflip_matches
+      group by player_a
+      union all
+      select player_b as wallet,
+             sum(bet_lamports*2)::bigint as amount,
+             max(created_at) as last_ts
+      from coinflip_matches
+      group by player_b
+    `);
+  }
+
+  if (await db._tableExistsUnsafe?.("slots_spins")) {
+    // slots bet_amount is in SOL; convert to lamports
+    parts.push(`
+      select player as wallet,
+             sum( (bet_amount*1e9)::bigint ) as amount,
+             max(created_at) as last_ts
+      from slots_spins
+      group by player
+    `);
+  }
+
+  if (!parts.length) {
+    return `
+      w as (
+        select ''::text as wallet, 0::bigint as wag, now() as last_wager_at
+        where false
+      )
+    `;
+  }
+
+  return `
+    w as (
+      select wallet, sum(amount)::bigint as wag, max(last_ts) as last_wager_at
+      from (
+        ${parts.join("\n      union all\n")}
+      ) _all
+      group by wallet
+    )
+  `;
+}
+
+// Activity feed (fixed to show real wagered amounts & latest activity from wagers or commissions)
 router.get("/affiliates/me/activity", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
     if (!wallet) return res.status(400).json({ error: "wallet required" });
 
-    const { rows } = await db.pool.query(`
+    const wCte = await _wageredCteForReferrals(db);
+
+    const sql = `
       with r as (
         select referred_wallet, min(bound_at) as first_at
         from referrals where referrer_wallet=$1 group by referred_wallet
@@ -1378,35 +1451,43 @@ router.get("/affiliates/me/activity", async (req, res) => {
         select referred_wallet, 
                coalesce(sum(affiliate_commission_lamports),0)::bigint as comm,
                coalesce(sum(ngr_lamports),0)::bigint as ngr,
-               max(created_at) as last_act
+               max(created_at) as last_comm_at
         from affiliate_commissions
         where referrer_wallet=$1
         group by referred_wallet
-      )
-      select r.referred_wallet,
-             r.first_at,
-             d.first_dep,
-             d.dep_cnt,
-             c.comm,
-             c.ngr,
-             c.last_act
+      ),
+      ${wCte}
+      select
+        r.referred_wallet,
+        r.first_at,
+        d.first_dep,
+        d.dep_cnt,
+        c.comm,
+        c.ngr,
+        w.wag,
+        greatest(coalesce(c.last_comm_at, to_timestamp(0)),
+                 coalesce(w.last_wager_at,  to_timestamp(0))) as last_act
       from r
       left join d on d.user_wallet = r.referred_wallet
       left join c on c.referred_wallet = r.referred_wallet
-      order by coalesce(c.last_act, r.first_at) desc
+      left join w on w.wallet = r.referred_wallet
+      order by coalesce(greatest(w.last_wager_at, c.last_comm_at), r.first_at) desc
       limit 50
-    `, [wallet]);
+    `;
+
+    const { rows } = await db.pool.query(sql, [wallet]);
 
     const out = rows.map((r, i) => {
-      const ngrUsd = lamportsToUsd(BigInt(r.ngr || 0n));
-      const commUsd = lamportsToUsd(BigInt(r.comm || 0n));
+      const wagerUsd = lamportsToUsd(BigInt(r.wag || 0n));
+      const commUsd  = lamportsToUsd(BigInt(r.comm || 0n));
+      const hasActivity = Boolean(r.last_act) || Number(r.dep_cnt || 0) > 0 || Number(r.wag || 0) > 0;
       return {
         id: i+1,
         username: mask(r.referred_wallet),
         firstDeposit: r.first_dep ? new Date(r.first_dep).toISOString().slice(0,10) : null,
-        amountWagered: +ngrUsd.toFixed(2),
+        amountWagered: +wagerUsd.toFixed(2),      // true wagered, not NGR
         commissionEarned: +commUsd.toFixed(2),
-        status: (r.last_act ? 'active' : 'pending'),
+        status: hasActivity ? 'active' : 'pending',
         lastActivity: r.last_act ? new Date(r.last_act).toISOString() : null,
         totalDeposits: Number(r.dep_cnt || 0),
       };
