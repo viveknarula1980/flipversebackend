@@ -6,16 +6,27 @@ const { Server } = require("socket.io");
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
-const { PublicKey } = require("@solana/web3.js");
+const { PublicKey, Connection } = require("@solana/web3.js");
 const path = require("path");
+
+// small fetch shim (Node 18+ has global fetch)
+const fetch =
+  global.fetch ||
+  ((...args) => import("node-fetch").then(({ default: f }) => f(...args)));
 
 // ---------- RPC / Program IDs ----------
 const CLUSTER = process.env.CLUSTER || "https://api.devnet.solana.com";
 if (!process.env.PROGRAM_ID) throw new Error("PROGRAM_ID missing in .env");
 const PROGRAM_ID = new PublicKey(process.env.PROGRAM_ID);
 
+// shared connection for live PDA lookups
+const connection = new Connection(CLUSTER, "confirmed");
+
 const CRASH_PROGRAM_ID =
-  process.env.CRASH_PROGRAM_ID || process.env.Crash_PROGRAM_ID || process.env.NEXT_PUBLIC_CRASH_PROGRAM_ID || null;
+  process.env.CRASH_PROGRAM_ID ||
+  process.env.Crash_PROGRAM_ID ||
+  process.env.NEXT_PUBLIC_CRASH_PROGRAM_ID ||
+  null;
 const PLINKO_PROGRAM_ID =
   process.env.PLINKO_PROGRAM_ID || process.env.NEXT_PUBLIC_PLINKO_PROGRAM_ID || null;
 const COINFLIP_PROGRAM_ID =
@@ -26,22 +37,41 @@ let db = require("./db");
 global.db = db;
 
 // ---------- Helpers ----------
-function pctToBps(x) { const n = Math.max(0, Math.min(100, Number(x))); return Math.round(n * 100); }
+function pctToBps(x) {
+  const n = Math.max(0, Math.min(100, Number(x)));
+  return Math.round(n * 100);
+}
 function normalizeHouseEdgePatch(patch) {
-  const he = patch?.houseEdgePct ?? patch?.house_edge_pct ?? patch?.houseEdge ?? patch?.house_edge ?? undefined;
+  const he =
+    patch?.houseEdgePct ??
+    patch?.house_edge_pct ??
+    patch?.houseEdge ??
+    patch?.house_edge ??
+    undefined;
   if (he == null || he === "") return null;
   const fee_bps = pctToBps(he);
   const rtp_bps = Math.max(0, 10000 - fee_bps);
   return { fee_bps, rtp_bps };
 }
-function isMaybeBase58(s) { return typeof s === "string" && s.length >= 32 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(s); }
+function isMaybeBase58(s) {
+  return typeof s === "string" && s.length >= 32 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(s);
+}
 function extractWalletFromArgs(args) {
   const a = args?.[0];
   if (a && typeof a === "object") {
-    for (const k of ["wallet", "user", "player", "address", "publicKey", "user_id", "userId"]) {
+    for (const k of [
+      "wallet",
+      "user",
+      "player",
+      "address",
+      "publicKey",
+      "user_id",
+      "userId",
+    ]) {
       const v = a[k];
       if (isMaybeBase58(v)) return v;
-      if (v && typeof v === "object" && isMaybeBase58(v?.toString?.())) return v.toString();
+      if (v && typeof v === "object" && isMaybeBase58(v?.toString?.()))
+        return v.toString();
     }
   }
   return null;
@@ -51,10 +81,70 @@ function getClientIp(req) {
   return xf || req.ip || req.connection?.remoteAddress || "";
 }
 
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
+const SITE_URL =
+  process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
 const PORT = Number(process.env.PORT || 4000);
 
-// ---------- PDA balance helpers ----------
+// ---------- Price helper (SOL→USDT) ----------
+const USD_PER_SOL_FALLBACK = Number(process.env.USD_PER_SOL || 200);
+let _priceCache = { t: 0, v: USD_PER_SOL_FALLBACK };
+async function getSolUsd() {
+  try {
+    // cache for 30s to avoid hammering
+    if (Date.now() - _priceCache.t < 30_000 && _priceCache.v > 0) return _priceCache.v;
+
+    const [cbRes, binRes] = await Promise.allSettled([
+      fetch("https://api.coinbase.com/v2/prices/SOL-USD/spot", { timeout: 4000 }),
+      fetch("https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT", {
+        timeout: 4000,
+      }),
+    ]);
+
+    const vals = [];
+    if (cbRes.status === "fulfilled") {
+      const j = await cbRes.value.json().catch(() => ({}));
+      const p = Number(j?.data?.amount);
+      if (p > 0) vals.push(p);
+    }
+    if (binRes.status === "fulfilled") {
+      const j = await binRes.value.json().catch(() => ({}));
+      const p = Number(j?.price);
+      if (p > 0) vals.push(p);
+    }
+    const price =
+      vals.length > 0
+        ? vals.reduce((a, b) => a + b, 0) / vals.length
+        : USD_PER_SOL_FALLBACK;
+
+    _priceCache = { t: Date.now(), v: price };
+    return price;
+  } catch {
+    return USD_PER_SOL_FALLBACK;
+  }
+}
+
+// ---------- PDA helpers (live balance) ----------
+function deriveUserVaultPda(playerPk) {
+  // must match the program's PDA seeds used in your on-chain program
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("user_vault"), new PublicKey(playerPk).toBuffer()],
+    PROGRAM_ID
+  );
+  return pda;
+}
+
+async function fetchLivePdaLamports(wallet) {
+  try {
+    const pda = deriveUserVaultPda(wallet);
+    const lamports = await connection.getBalance(pda, "confirmed");
+    return lamports; // number
+  } catch (e) {
+    // swallow and let caller fall back to DB value
+    return null;
+  }
+}
+
+// ---------- PDA balance updaters (DB) ----------
 async function setAbsolutePdaBalance(wallet, sol) {
   const val = Number(sol) || 0;
   await db.pool.query(
@@ -77,7 +167,11 @@ async function adjustPdaBalance(wallet, deltaSol) {
 }
 
 async function main() {
-  try { if (db.ensureSchema) await db.ensureSchema(); } catch (e) { console.warn("[ensureSchema] failed:", e?.message || e); }
+  try {
+    if (db.ensureSchema) await db.ensureSchema();
+  } catch (e) {
+    console.warn("[ensureSchema] failed:", e?.message || e);
+  }
 
   const app = express();
   app.set("trust proxy", true);
@@ -86,7 +180,7 @@ async function main() {
   const defaultAllowed = ["http://localhost:3000", "https://flipverse-web.vercel.app"];
   const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || defaultAllowed.join(","))
     .split(",")
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 
   const corsOptions = {
@@ -230,7 +324,8 @@ async function main() {
       );
       for (const r of gr.rows) {
         out[r.game_key] = out[r.game_key] || { revenue: 0, plays: 0 };
-        out[r.game_key].revenue += Number(r.rev) / 1e9 * (Number(process.env.USD_PER_SOL || 200));
+        out[r.game_key].revenue +=
+          (Number(r.rev) / 1e9) * Number(process.env.USD_PER_SOL || 200);
         out[r.game_key].plays += Number(r.plays || 0);
       }
 
@@ -241,7 +336,8 @@ async function main() {
            from coinflip_matches`
         );
         out["coinflip"] = out["coinflip"] || { revenue: 0, plays: 0 };
-        out["coinflip"].revenue += Number(cf.rows[0].rev || 0) / 1e9 * (Number(process.env.USD_PER_SOL || 200));
+        out["coinflip"].revenue +=
+          (Number(cf.rows[0].rev || 0) / 1e9) * Number(process.env.USD_PER_SOL || 200);
         out["coinflip"].plays += Number(cf.rows[0].plays || 0);
       }
 
@@ -251,7 +347,8 @@ async function main() {
                   count(*)::int as plays
            from slots_spins`
         );
-        const usd = Number(ss.rows[0].rev_sol || 0) * (Number(process.env.USD_PER_SOL || 200));
+        const usd =
+          Number(ss.rows[0].rev_sol || 0) * Number(process.env.USD_PER_SOL || 200);
         out["slots"] = out["slots"] || { revenue: 0, plays: 0 };
         out["slots"].revenue += usd;
         out["slots"].plays += Number(ss.rows[0].plays || 0);
@@ -355,7 +452,24 @@ async function main() {
         status: String(status),
         search: String(search),
       });
-      res.json(data);
+
+      // augment with live PDA balances (lamports & USDT)
+      const price = await getSolUsd();
+      const users = await Promise.all(
+        data.users.map(async (u) => {
+          const liveLamports = await fetchLivePdaLamports(u.walletAddress);
+          const lam = liveLamports != null ? liveLamports : Number(u.pdaBalance || 0);
+          const usdt = (lam / 1e9) * price;
+
+          return {
+            ...u, // keep original fields for compatibility
+            pdaBalanceLamports: lam,
+            pdaBalanceUsdt: Number(usdt.toFixed(2)),
+          };
+        })
+      );
+
+      res.json({ ...data, users });
     } catch (e) {
       res.status(500).json({ error: e?.message || String(e) });
     }
@@ -366,7 +480,17 @@ async function main() {
       const id = String(req.params.id);
       const u = await db.getUserDetails(id);
       if (!u) return res.status(404).json({ error: "User not found" });
-      res.json(u);
+
+      const price = await getSolUsd();
+      const liveLamports = await fetchLivePdaLamports(u.walletAddress);
+      const lam = liveLamports != null ? liveLamports : Number(u.pdaBalance || 0);
+      const usdt = (lam / 1e9) * price;
+
+      res.json({
+        ...u,
+        pdaBalanceLamports: lam,
+        pdaBalanceUsdt: Number(usdt.toFixed(2)),
+      });
     } catch (e) {
       res.status(500).json({ error: e?.message || String(e) });
     }
@@ -442,7 +566,16 @@ async function main() {
       });
 
       const header = [
-        "id","username","walletAddress","type","game","amount","currency","status","timestamp","payout",
+        "id",
+        "username",
+        "walletAddress",
+        "type",
+        "game",
+        "amount",
+        "currency",
+        "status",
+        "timestamp",
+        "payout",
       ].join(",");
       const lines = data.transactions.map((t) =>
         [
@@ -461,7 +594,10 @@ async function main() {
       const csv = [header].concat(lines).join("\n");
 
       res.setHeader("Content-Type", "text/csv; charset=utf-8");
-      res.setHeader("Content-Disposition", `attachment; filename="transactions_export.csv"`);
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="transactions_export.csv"`
+      );
       res.send(csv);
     } catch (e) {
       res.status(500).json({ error: e?.message || String(e) });
@@ -485,9 +621,12 @@ async function main() {
       const id = String(req.params.id);
       const { amountSol, amountLamports, pdaSol, pdaLamports, txHash } = req.body || {};
 
-      const deltaSol = amountSol != null ? Number(amountSol) : Number(amountLamports || 0) / 1e9;
+      const deltaSol =
+        amountSol != null ? Number(amountSol) : Number(amountLamports || 0) / 1e9;
       if (!isFinite(deltaSol) || deltaSol <= 0) {
-        return res.status(400).json({ error: "amountSol or amountLamports required (> 0)" });
+        return res
+          .status(400)
+          .json({ error: "amountSol or amountLamports required (> 0)" });
       }
 
       await db.recordActivity({ user: id, action: "deposit", amount: deltaSol, tx_hash: txHash });
@@ -510,9 +649,12 @@ async function main() {
       const id = String(req.params.id);
       const { amountSol, amountLamports, pdaSol, pdaLamports, txHash } = req.body || {};
 
-      const deltaSol = amountSol != null ? Number(amountSol) : Number(amountLamports || 0) / 1e9;
+      const deltaSol =
+        amountSol != null ? Number(amountSol) : Number(amountLamports || 0) / 1e9;
       if (!isFinite(deltaSol) || deltaSol <= 0) {
-        return res.status(400).json({ error: "amountSol or amountLamports required (> 0)" });
+        return res
+          .status(400)
+          .json({ error: "amountSol or amountLamports required (> 0)" });
       }
 
       await db.recordActivity({ user: id, action: "withdraw", amount: deltaSol, tx_hash: txHash });
@@ -603,9 +745,11 @@ async function main() {
     try {
       const mod = require(modulePath);
       const fn =
-        typeof mod === "function" ? mod
-        : typeof mod?.[attachName] === "function" ? mod[attachName]
-        : null;
+        typeof mod === "function"
+          ? mod
+          : typeof mod?.[attachName] === "function"
+          ? mod[attachName]
+          : null;
 
       if (fn) {
         fn(io);
@@ -661,12 +805,14 @@ async function main() {
 
   server.listen(PORT, () => {
     console.log(
-      `api up on :${PORT} (cluster=${CLUSTER}, dice_program=${PROGRAM_ID.toBase58()}, crash_program=${CRASH_PROGRAM_ID || "—"}, plinko_program=${PLINKO_PROGRAM_ID || "—"}, coinflip_program=${COINFLIP_PROGRAM_ID || "—"})`
+      `api up on :${PORT} (cluster=${CLUSTER}, dice_program=${PROGRAM_ID.toBase58()}, crash_program=${
+        CRASH_PROGRAM_ID || "—"
+      }, plinko_program=${PLINKO_PROGRAM_ID || "—"}, coinflip_program=${COINFLIP_PROGRAM_ID || "—"})`
     );
   });
 
   function ioPlaceholder() {
-    return { of(){return this;}, on(){}, emit(){}, use(){} };
+    return { of() { return this; }, on() {}, emit() {}, use() {} };
   }
 }
 
