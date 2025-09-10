@@ -442,6 +442,11 @@ const {
 
 const DB = global.db || require("./db");
 
+const { precheckOrThrow } = require("./bonus_guard");
+
+
+
+
 // ---------- fixed payout tables (multipliers & probabilities) ----------
 const PLINKO_TABLE = {
   easy: {
@@ -612,6 +617,12 @@ function attachPlinko(io) {
         const feePayer = await getServerKeypair();
         const cuPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
         const cuLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 350_000 });
+// Welcome bonus guard check
+await precheckOrThrow({
+  userWallet: player,                 // base58 string
+  stakeLamports: String(total),       // total = unitLamports * balls
+  gameKey: "plinko",
+});
 
         const lockIx = ixPlinkoLock({
           programId: PROGRAM_ID,

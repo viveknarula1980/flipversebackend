@@ -391,6 +391,7 @@ const {
 } = require("./signer");
 
 const DB = global.db || require("./db");
+const { precheckOrThrow } = require("./bonus_guard");
 
 function toBetTypeNum(x) {
   if (typeof x === "string") return x.toLowerCase() === "over" ? 1 : 0;
@@ -530,7 +531,19 @@ function attachDice(io) {
         const feePayer = await getServerKeypair();
         const cuPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
         const cuLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 350_000 });
+        await precheckOrThrow({
+  userWallet: player,
+  stakeLamports: String(betLamports),
+  gameKey: "dice",
+});
 
+        // before building lock/tx:
+await precheckOrThrow({
+  userWallet: player,                 // base58
+  stakeLamports: betLamports,         // BigInt or Number
+  gameKey: "dice",                    // "crash","plinko","mines","memeslot","coinflip_pvp"
+  // autoCashoutX: 1.1                 // e.g. for crash guard hint, optional
+});
         const lockIx = ixPlaceBetFromVault({
           programId: PROGRAM_ID,
           player: playerPk,

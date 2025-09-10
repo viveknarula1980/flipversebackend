@@ -693,3 +693,19 @@ create index if not exists idx_wallet_events_user on wallet_events (user_wallet,
 create unique index if not exists uniq_wallet_events_sig_kind_user_amt
   on wallet_events (tx_sig, kind, user_wallet, amount_sol)
   where tx_sig is not null;
+
+
+-- Fix 1: add updated_at used by welcome_bonus_states updates
+alter table welcome_bonus_states
+  add column if not exists updated_at timestamptz not null default now();
+
+-- Fix 2: add aux_json payload column for WR events
+alter table welcome_wr_events
+  add column if not exists aux_json jsonb;
+
+
+ALTER TABLE welcome_bonuses
+  ADD COLUMN IF NOT EXISTS first_deposit_at TIMESTAMP WITH TIME ZONE,
+  ADD COLUMN IF NOT EXISTS first_deposit_lamports BIGINT DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS claimed BOOLEAN DEFAULT false,
+  ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP WITH TIME ZONE;

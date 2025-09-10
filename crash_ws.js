@@ -377,6 +377,8 @@ const {
 } = require("@solana/web3.js");
 
 const DB = global.db || require("./db");
+const { precheckOrThrow } = require("./bonus_guard");
+
 
 const {
   connection,
@@ -569,7 +571,20 @@ function attachCrash(io) {
         const edIndex = 1; // [cuLimit, edIx, crash_lock]
         const payer   = await getServerKeypair();
         const cuLimit = ComputeBudgetProgram.setComputeUnitLimit({ units: 220_000 });
+await precheckOrThrow({
+  userWallet: player,
+  stakeLamports: String(betLamports),
+  gameKey: "crash",
+});
 
+        // before building lock/tx:
+await precheckOrThrow({
+  userWallet: player,                 // base58
+  stakeLamports: betLamports,         // BigInt or Number
+  gameKey: "crash",                    // "crash","plinko","mines","memeslot","coinflip_pvp"
+  // autoCashoutX: 1.1                 // e.g. for crash guard hint, optional
+});
+        
         // Server pays — no Phantom popup
         const ixLock  = ixCrashLock({
           programId: PROGRAM_ID,

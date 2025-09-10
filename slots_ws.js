@@ -427,6 +427,8 @@ const {
 const { ixSlotsLock, ixSlotsResolve } = require("./solana_anchor_ix");
 const { ADMIN_PK, getServerKeypair } = require("./signer");
 const DB = global.db || require("./db");
+const { precheckOrThrow } = require("./bonus_guard");
+
 
 const SYSVAR_INSTRUCTIONS_PUBKEY = new PublicKey("Sysvar1nstructions1111111111111111111111111");
 
@@ -610,6 +612,13 @@ function attachSlots(io) {
             code: "BET_RANGE",
             message: "Bet outside allowed range",
           });
+          // Bonus guard check (welcome bonus, max bet, WR, etc.)
+await precheckOrThrow({
+  userWallet: player,                  // base58 pubkey
+  stakeLamports: betLamports.toString(), // string, not BigInt
+  gameKey: "slots",
+});
+
 
         const playerPk = new PublicKey(player);
         const userVault = deriveUserVaultPda(playerPk);
@@ -634,6 +643,7 @@ function attachSlots(io) {
         const cuPrice = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
         const cuLimit = ComputeBudgetProgram.setComputeUnitLimit({ units: 350_000 });
 
+        
         const lockIx = ixSlotsLock({
           programId: PROGRAM_ID,
           player: playerPk,

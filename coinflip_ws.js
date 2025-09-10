@@ -579,6 +579,8 @@ const {
 } = require("./signer");
 
 const DB = global.db || require("./db");
+const { precheckOrThrow } = require("./bonus_guard");
+
 
 // ---------- helpers ----------
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -853,6 +855,12 @@ function attachCoinflip(io) {
         const stake = BigInt(entryLamports || 0);
         if (!(stake > 0n)) return socket.emit("coinflip:error", { code: "BAD_BET", message: "entryLamports must be > 0" });
         if (stake < min || stake > max) return socket.emit("coinflip:error", { code: "BET_RANGE", message: "Bet outside allowed range" });
+      // 🔒 Bonus guard (welcome bonus, wagering rules, max-bet, etc.)
+await precheckOrThrow({
+  userWallet: player,                 // base58 pubkey
+  stakeLamports: stake.toString(),    // stringify the lamports
+  gameKey: "coinflip_pvp",            // keep unique key for this game
+});
 
         const s = clamp(Number(side), 0, 1);
         const playerPk = new PublicKey(player);

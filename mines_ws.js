@@ -351,6 +351,8 @@ const {
 const { signMessageEd25519 } = require("./signer");
 const { getServerKeypair } = require("./signer");
 const DB = global.db || require("./db");
+const { precheckOrThrow } = require("./bonus_guard");
+
 
 // ----- helpers -----
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
@@ -431,6 +433,20 @@ function attachMines(io) {
         const cuLimit  = ComputeBudgetProgram.setComputeUnitLimit({ units: 900_000 });
         const cuPrice  = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
 
+
+        await precheckOrThrow({
+  userWallet: player,
+  stakeLamports: String(betLamports),
+  gameKey: "mines",
+});
+
+        // before building lock/tx:
+await precheckOrThrow({
+  userWallet: player,                 // base58
+  stakeLamports: betLamports,         // BigInt or Number
+  gameKey: "mines",                    // "crash","plinko","mines","memeslot","coinflip_pvp"
+  // autoCashoutX: 1.1                 // e.g. for crash guard hint, optional
+});
         const lockIx = ixMinesLock({
           programId: PROGRAM_ID,
           player: playerPk,

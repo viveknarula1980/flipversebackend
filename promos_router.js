@@ -1033,21 +1033,21 @@ router.post("/referrals/first-deposit", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 
-// Welcome claim marker
-router.post("/welcome/claim", async (req, res) => {
-  try {
-    const userWallet = normalizeWallet(req.body?.userWallet);
-    if (!userWallet) return res.status(400).json({ error: "userWallet required" });
+// // Welcome claim marker
+// router.post("/welcome/claim", async (req, res) => {
+//   try {
+//     const userWallet = normalizeWallet(req.body?.userWallet);
+//     if (!userWallet) return res.status(400).json({ error: "userWallet required" });
 
-    const { rows:w } = await db.pool.query(`select * from welcome_bonuses where user_wallet=$1`, [String(userWallet)]);
-    const row = w[0];
-    if (!row || BigInt(row.first_deposit_lamports) <= 0n) return res.status(400).json({ error:"no eligible deposit" });
-    if (row.claimed) return res.json({ ok:true, alreadyClaimed:true, claimedAt: row.claimed_at });
+//     const { rows:w } = await db.pool.query(`select * from welcome_bonuses where user_wallet=$1`, [String(userWallet)]);
+//     const row = w[0];
+//     if (!row || BigInt(row.first_deposit_lamports) <= 0n) return res.status(400).json({ error:"no eligible deposit" });
+//     if (row.claimed) return res.json({ ok:true, alreadyClaimed:true, claimedAt: row.claimed_at });
 
-    await db.pool.query(`update welcome_bonuses set claimed=true, claimed_at=now() where user_wallet=$1`, [String(userWallet)]);
-    res.json({ ok:true, message:"Welcome bonus marked claimed." });
-  } catch (e) { res.status(500).json({ error: e?.message || String(e) }); }
-});
+//     await db.pool.query(`update welcome_bonuses set claimed=true, claimed_at=now() where user_wallet=$1`, [String(userWallet)]);
+//     res.json({ ok:true, message:"Welcome bonus marked claimed." });
+//   } catch (e) { res.status(500).json({ error: e?.message || String(e) }); }
+// });
 
 // ---------- Admin: Affiliate overview ----------
 router.get("/affiliates/admin/summary", async (_req, res) => {
