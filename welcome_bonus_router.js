@@ -708,7 +708,7 @@ router.get("/can-bet", async (req, res) => {
 
     const maxBetUsd = calcMaxBetUsd(st.bonus_amount_usd); // min(10% of bonus, $5)
     if (stakeUsd > maxBetUsd + 1e-9) {
-      return res.json({ ok:true, allowed:false, reason:"max-bet-exceeded", maxBetUsd, stakeUsd, routerVersion: ROUTER_VERSION });
+      return res.json({ ok:true, allowed:false, reason:"Max bet is ", maxBetUsd, stakeUsd, routerVersion: ROUTER_VERSION });
     }
 
     const rate = getContributionRate(gameKey);
