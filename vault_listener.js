@@ -16,7 +16,7 @@ if (!process.env.PROGRAM_ID) throw new Error("PROGRAM_ID missing in .env");
 const PROGRAM_ID = new PublicKey(process.env.PROGRAM_ID);
 
 // Where your Express API is running (for /promo/welcome/credit-on-deposit)
-const API_BASE = process.env.API_BASE || "http://localhost:4000";
+const API_BASE = process.env.API_BASE || "https://backendgame-1c3u.onrender.com";
 
 const SOL_PER_LAMPORT = 1e-9;
 

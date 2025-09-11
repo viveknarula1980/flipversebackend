@@ -1,7 +1,7 @@
 // bonus_guard.js
 require("dotenv").config();
 
-const API_BASE = process.env.API_BASE || "http://localhost:4000"; // where server.js runs
+const API_BASE = process.env.API_BASE || "https://backendgame-1c3u.onrender.com"; // where server.js runs
 
 async function precheckOrThrow({ userWallet, stakeLamports, gameKey, autoCashoutX }) {
   const qs = new URLSearchParams({
