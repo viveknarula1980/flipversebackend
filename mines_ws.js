@@ -434,11 +434,7 @@ function attachMines(io) {
         const cuPrice  = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
 
 
-        await precheckOrThrow({
-  userWallet: player,
-  stakeLamports: String(betLamports),
-  gameKey: "mines",
-});
+   
 
         // before building lock/tx:
 await precheckOrThrow({

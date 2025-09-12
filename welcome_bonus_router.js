@@ -1,14 +1,14 @@
-// welcome_bonus_router.js — ZOGGY Welcome Bonus (400% + 30 FS)
-// Mount at: app.use("/promo/welcome", require("./welcome_bonus_router"));
+// backend/welcome_bonus_router.js
+// ZOGGY Welcome Bonus router — consolidated, fixed, with game-key aliases
+// Router version identifier
+const ROUTER_VERSION = "wb-3.2.1-transfer-first-txsig-fixed-aliases";
 
 const express = require("express");
 const router = express.Router();
 const db = require("./db");
 
-// ⬇️ REAL TRANSFER helper (uses HOUSE_SECRET_KEY & PROGRAM_ID)
+// Real transfer helper (should exist in your project)
 const { depositBonusToVault } = require("./bonus_transfer");
-
-const ROUTER_VERSION = "wb-3.2.1-transfer-first-txsig";
 
 // -------------------- Config --------------------
 const USD_PER_SOL_FALLBACK = Number(process.env.USD_PER_SOL || 200);
@@ -52,8 +52,26 @@ const WELCOME_CFG = {
   allow_forfeit_to_withdraw: true,
 };
 
-// -------------------- Utils --------------------
-const toLamports    = (sol) => Math.round(Number(sol || 0) * 1e9);
+// ---- Game key normalization (aliases)
+const KEY_ALIASES = {
+  slot: "memeslot",
+  slots: "memeslot",
+  slots_spins: "memeslot",
+  slots_spin: "memeslot",
+  slot_spin: "memeslot",
+  pvp_coinflip: "coinflip_pvp",
+  coinflip: "coinflip_pvp",
+  cf: "coinflip_pvp",
+};
+
+function normalizeGameKey(key) {
+  const k = String(key || "").toLowerCase().trim();
+  if (!k) return "";
+  return KEY_ALIASES[k] || k;
+}
+
+// -------------------- Utilities --------------------
+const toLamports = (sol) => Math.round(Number(sol || 0) * 1e9);
 const lamportsToSol = (lam) => Number(lam || 0) / 1e9;
 const normalizeWallet = (s) => {
   const x = (s == null) ? "" : String(s).trim();
@@ -124,7 +142,7 @@ async function ensureSchema() {
   _schemaEnsured = true;
 }
 
-// -------------------- Live SOL/USD (cached) --------------------
+// -------------------- Live SOL/USD price (cached) --------------------
 const PRICE_TTL_MS = Number(process.env.PRICE_TTL_MS || 60_000);
 let _priceCache = { usd: null, ts: 0 };
 const _fetch = (...args) =>
@@ -154,9 +172,12 @@ async function getSolUsdPrice() {
   _priceCache = { usd, ts: now };
   return usd;
 }
+
 async function lamportsToUsdDynamic(lamports) {
   const price = await getSolUsdPrice();
-  return lamportsToSol(lamports) * price;
+  // lamports may be big int or string; coerce
+  const lam = typeof lamports === "bigint" ? Number(lamports) : Number(String(lamports || "0"));
+  return lamportsToSol(lam) * price;
 }
 async function usdToLamports(usd) {
   const price = await getSolUsdPrice();
@@ -169,7 +190,10 @@ const calcBonusUsd = (depUsd) => Math.min(Number(depUsd || 0) * WELCOME_CFG.depo
 const calcWrRequiredUnits = (bonusUsd) => Number(bonusUsd || 0) * WELCOME_CFG.wagering.multiplier;
 const calcMaxBetUsd       = (bonusUsd) => Math.min(Number(bonusUsd || 0) * WELCOME_CFG.wagering.maxBet.percent_bonus, WELCOME_CFG.wagering.maxBet.hard_cap);
 const expiresAtDate = () => { const d = new Date(); d.setUTCDate(d.getUTCDate() + WELCOME_CFG.wagering.expires_days); return d; };
-const getContributionRate = (key) => Number(WELCOME_CFG.eligibility.games[key]?.contribution_rate || 0);
+const getContributionRate = (key) => {
+  const k = normalizeGameKey(key);
+  return Number(WELCOME_CFG.eligibility.games[k]?.contribution_rate || 0);
+};
 
 // -------------------- DB/state helpers --------------------
 async function getWelcomeMeta(userWallet) {
@@ -244,7 +268,7 @@ async function forfeitBonus(userWallet) {
   );
 }
 
-// ---- Eligibility helpers ----
+// -------------------- Eligibility helpers --------------------
 async function sumDeposits(userWallet, withinDays = null) {
   if (withinDays && Number(withinDays) > 0) {
     try {
@@ -311,10 +335,11 @@ async function applyWagerContribution({ userWallet, game_key, stakeUsd, aux }) {
     return { ok:false, counted:false, reason:"max-bet-exceeded", maxBetUsd, stakeUsd };
   }
 
-  const key = String(game_key || "").toLowerCase();
+  const key = normalizeGameKey(game_key);
   let rate = getContributionRate(key);
   if (rate <= 0) return { ok:true, counted:false, reason:"not-eligible" };
 
+  // game-specific heuristics
   if (key === "crash") {
     const cm = Number(aux?.cashoutMultiplier || 0);
     const usedAuto = Boolean(aux?.usedAutoCashout);
@@ -396,7 +421,7 @@ async function settleFreeSpins({ userWallet, fs_winnings_raw_usd }) {
 
 // -------------------- Routes --------------------
 
-// Credit on deposit — NO activation; only record deposit & remember FIRST deposit time.
+// Credit on deposit — record deposit & remember FIRST deposit time.
 router.post("/credit-on-deposit", async (req, res) => {
   try {
     await ensureSchema();
@@ -708,7 +733,7 @@ router.get("/can-bet", async (req, res) => {
 
     const maxBetUsd = calcMaxBetUsd(st.bonus_amount_usd); // min(10% of bonus, $5)
     if (stakeUsd > maxBetUsd + 1e-9) {
-      return res.json({ ok:true, allowed:false, reason:"Max bet is ", maxBetUsd, stakeUsd, routerVersion: ROUTER_VERSION });
+      return res.json({ ok:true, allowed:false, reason:"max-bet-exceeded", maxBetUsd, stakeUsd, routerVersion: ROUTER_VERSION });
     }
 
     const rate = getContributionRate(gameKey);
@@ -745,4 +770,54 @@ router.post("/report_bet", async (req, res) => {
   }
 });
 
+// Free-spins settle (optional API to settle FS winnings and add WR)
+router.post("/fs/settle", async (req, res) => {
+  try {
+    if (!assertBackendAuth(req)) return res.status(401).json({ error:"unauthorized", routerVersion: ROUTER_VERSION });
+    const userWallet = normalizeWallet(req.body?.userWallet);
+    const winningsUsd = Number(req.body?.winningsUsd || 0);
+    if (!userWallet) return res.status(400).json({ error:"userWallet required", routerVersion: ROUTER_VERSION });
+    if (!(winningsUsd >= 0)) return res.status(400).json({ error:"winningsUsd required", routerVersion: ROUTER_VERSION });
+
+    const out = await settleFreeSpins({ userWallet, fs_winnings_raw_usd: winningsUsd });
+    res.json({ ...out, routerVersion: ROUTER_VERSION });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e), routerVersion: ROUTER_VERSION });
+  }
+});
+
+// -------------------- WAGER HOOK REGISTRATION --------------------
+// Register a DB wager hook so that when db.recordGameRound/recordBet/recordCoinflipMatch
+// are called, they will send events here and we'll credit WR via applyWagerContribution.
+if (db && typeof db.registerWagerHook === "function") {
+  db.registerWagerHook(async ({ userWallet, game_key, stakeLamports, payoutLamports, aux }) => {
+    try {
+      if (!userWallet) return;
+      // treat stakeLamports as string or bigint
+      const lam = (typeof stakeLamports === "bigint") ? stakeLamports : BigInt(String(stakeLamports || "0"));
+      if (lam <= 0n) return;
+
+      const stakeUsd = await lamportsToUsdDynamic(lam.toString());
+
+      const hookAux = Object.assign({}, aux || {});
+      // if IP available and not masked, mask it
+      if (!hookAux.ip_masked_a && hookAux.ip_a) hookAux.ip_masked_a = maskIp(hookAux.ip_a);
+
+      try {
+        await applyWagerContribution({
+          userWallet: String(userWallet),
+          game_key: String(game_key || ""),
+          stakeUsd: Number(stakeUsd || 0),
+          aux: hookAux,
+        });
+      } catch (err) {
+        console.warn("[welcome_bonus_router] applyWagerContribution failed:", err?.message || err);
+      }
+    } catch (err) {
+      console.warn("[welcome_bonus_router] wagerHook failed:", err?.message || err);
+    }
+  });
+}
+
+// -------------------- Exports --------------------
 module.exports = router;

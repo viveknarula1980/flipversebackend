@@ -5,7 +5,7 @@ const db = require("./db");
 
 const USD_PER_SOL = Number(process.env.USD_PER_SOL || 200);
 const SITE_URL =
-  process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
+  process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://flipverse-web.vercel.app";
 
 const toLam = (usd) => {
   const n = Number(usd);

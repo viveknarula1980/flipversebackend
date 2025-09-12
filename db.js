@@ -6,6 +6,26 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : undefined,
 });
 
+// -------------------- WAGER HOOKS --------------------
+// Other modules can register async hooks that accept an event:
+// { userWallet, game_key, stakeLamports, payoutLamports, aux }
+// Hooks are executed sequentially (best-effort; errors are logged and swallowed).
+const _wagerHooks = [];
+function registerWagerHook(fn) {
+  if (typeof fn === "function") _wagerHooks.push(fn);
+}
+async function _runWagerHooks(event) {
+  if (!event) return;
+  for (const h of _wagerHooks) {
+    try {
+      // allow sync or async
+      await Promise.resolve(h(event));
+    } catch (err) {
+      try { console.warn("[db._runWagerHooks] hook failed:", err?.message || err); } catch {}
+    }
+  }
+}
+
 // -------------------- bootstrap --------------------
 async function ensureSchema() {
   const fs = require("fs");
@@ -166,6 +186,8 @@ async function upsertGameConfig(game_key, patch = {}) {
 }
 
 // -------------------- generic rounds & activities --------------------
+const affiliateService = require("./affiliate_service")(pool);
+
 async function recordGameRound({
   game_key,
   player,
@@ -174,9 +196,10 @@ async function recordGameRound({
   payout_lamports,
   result_json,
 }) {
-  await pool.query(
+  const { rows } = await pool.query(
     `insert into game_rounds (game_key, player, nonce, stake_lamports, payout_lamports, result_json)
-     values ($1,$2,$3,$4,$5,$6)`,
+     values ($1,$2,$3,$4,$5,$6)
+     returning id, created_at`,
     [
       String(game_key),
       String(player),
@@ -186,9 +209,44 @@ async function recordGameRound({
       result_json ? JSON.stringify(result_json) : JSON.stringify({}),
     ]
   );
+  const insertedId = rows[0]?.id || null;
+
   // keep app_users "active"
   await upsertAppUserLastActive(String(player));
+
+  // --- credit affiliate & rakeback (fire-and-forget safe pattern) ---
+  (async () => {
+    try {
+      await affiliateService.creditAffiliateAndRakeback({
+        player: String(player),
+        game_key: String(game_key),
+        round_id: insertedId,
+        stakeLamports: BigInt(stake_lamports || 0).toString(),
+        payoutLamports: BigInt(payout_lamports || 0).toString(),
+      });
+    } catch (err) {
+      console.warn("[affiliateService.creditAffiliateAndRakeback] failed:", err?.message || err);
+    }
+  })();
+
+  // notify registered wager hooks (best-effort)
+  (async () => {
+    try {
+      await _runWagerHooks({
+        userWallet: String(player),
+        game_key: String(game_key),
+        stakeLamports: BigInt(stake_lamports || 0).toString(),
+        payoutLamports: BigInt(payout_lamports || 0).toString(),
+        aux: result_json || null,
+      });
+    } catch (err) {
+      // logged inside _runWagerHooks
+    }
+  })();
+
+  return insertedId;
 }
+
 
 /**
  * Record activity; amount is in SOL by convention.
@@ -269,6 +327,42 @@ async function recordCoinflipMatch(row) {
   );
   await upsertAppUserLastActive(String(row.player_a));
   if (row.player_b) await upsertAppUserLastActive(String(row.player_b));
+
+  // notify wager hooks for both players (coinflip is PvP)
+  (async () => {
+    try {
+      // player_a
+      await _runWagerHooks({
+        userWallet: String(row.player_a),
+        game_key: "coinflip_pvp",
+        stakeLamports: BigInt(row.bet_lamports || 0).toString(),
+        payoutLamports: BigInt(row.payout_lamports || 0).toString(),
+        aux: {
+          opponent_wallet: String(row.player_b || ""),
+          side_a: row.side_a,
+          side_b: row.side_b,
+          winner: row.winner,
+        },
+      });
+      // player_b (if exists)
+      if (row.player_b) {
+        await _runWagerHooks({
+          userWallet: String(row.player_b),
+          game_key: "coinflip_pvp",
+          stakeLamports: BigInt(row.bet_lamports || 0).toString(),
+          payoutLamports: BigInt(row.payout_lamports || 0).toString(),
+          aux: {
+            opponent_wallet: String(row.player_a || ""),
+            side_a: row.side_a,
+            side_b: row.side_b,
+            winner: row.winner,
+          },
+        });
+      }
+    } catch (err) {
+      // logged by _runWagerHooks
+    }
+  })();
 }
 
 // -------------------- bets table helpers (dice) --------------------
@@ -293,6 +387,25 @@ async function recordBet(b) {
     ]
   );
   await upsertAppUserLastActive(String(b.player));
+
+  // notify wager hooks
+  (async () => {
+    try {
+      await _runWagerHooks({
+        userWallet: String(b.player),
+        game_key: "dice",
+        stakeLamports: BigInt(b.amount || 0).toString(),
+        payoutLamports: BigInt(b.payout || 0).toString(),
+        aux: {
+          betType: b.betType,
+          target: b.target,
+          nonce: b.nonce,
+        },
+      });
+    } catch (err) {
+      // logged by _runWagerHooks
+    }
+  })();
 }
 async function getBetByNonce(nonce) {
   const { rows } = await pool.query(
@@ -1020,6 +1133,9 @@ module.exports = {
   // deposits
   recordDeposit,
   annotateDepositBySig,
+
+  // wager hooks
+  registerWagerHook,
 
   // internal
   _tableExistsUnsafe,

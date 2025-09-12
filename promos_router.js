@@ -2,6 +2,8 @@
 const express = require("express");
 const router = express.Router();
 const db = require("./db");
+const affiliateService = require("./affiliate_service")(db.pool);
+
 
 // ---------- config & utils ----------
 const big = (v) => (v == null ? null : String(v));
@@ -34,6 +36,26 @@ const WELCOME_MAXBET_PERCENT_OF_BONUS = 0.10;
 const WELCOME_MAXBET_HARDCAP_USD = 5.0;
 const WELCOME_FS = { count: 30, game_id: "memeslot", value_usd: 0.25, max_win_usd: 30 };
 
+// ---- Game key normalization (aliases) ----
+const KEY_ALIASES = {
+  slot: "memeslot",
+  slots: "memeslot",
+  slots_spins: "memeslot",
+  memeslot: "memeslot",
+  meme: "memeslot",
+  mine: "mines",
+  mines: "mines",
+  crash: "crash",
+  plinko: "plinko",
+  dice: "dice",
+  coinflip: "coinflip_pvp",
+  coinflip_pvp: "coinflip_pvp",
+};
+const normalizeGameKey = (raw) => {
+  const k = String(raw || "").trim().toLowerCase();
+  return KEY_ALIASES[k] || k;
+};
+
 // WR eligible contribution rates per game
 const CONTRIBUTION_RATES = {
   memeslot: 1.0,
@@ -47,7 +69,7 @@ const CONTRIBUTION_RATES = {
 const COINFLIP_UNIQUE_OPP_REQ = Number(process.env.BONUS_COINFLIP_MIN_UNIQUE_OPPONENTS || 5);
 const COINFLIP_DAILY_WR_CAP_USD = Number(process.env.BONUS_COINFLIP_DAILY_WR_CAP_USD || 200);
 
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "https://flipverse-web.vercel.app";
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://flipverse-web.vercel.app";
 // where the API is hosted (used to build the /r/:code tracker link we show to users)
 const API_BASE =
   process.env.API_BASE_URL ||
@@ -378,7 +400,7 @@ router.get("/chest/daily/eligibility", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
     const deviceId = req.query.deviceId ? String(req.query.deviceId) : null;
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
 
     const today = utcDate();
     const ymd = dateToYMD(today);
@@ -411,7 +433,7 @@ router.post("/chest/daily/claim", async (req, res) => {
   try {
     const userWallet = normalizeWallet(req.body?.userWallet);
     const deviceId = req.body?.deviceId ? String(req.body.deviceId) : null;
-    if (!userWallet) return res.status(400).json({ error: "userWallet required" });
+    if (!userWallet) return res.status(400).json({ error: "userWallet is required" });
 
     const today = utcDate();
     const ymd = dateToYMD(today);
@@ -454,7 +476,7 @@ router.post("/chest/daily/claim", async (req, res) => {
 router.get("/chest/weekly/eligibility", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
 
     // must have 7 consecutive daily chest claims (each daily claim itself required wagers)
     let ok = true;
@@ -488,7 +510,7 @@ router.post("/chest/weekly/claim", async (req, res) => {
   try {
     const userWallet = normalizeWallet(req.body?.userWallet);
     const deviceId = req.body?.deviceId ? String(req.body.deviceId) : null;
-    if (!userWallet) return res.status(400).json({ error: "userWallet required" });
+    if (!userWallet) return res.status(400).json({ error: "userWallet is required" });
 
     // require 7 consecutive daily chests
     for (let i = 0; i < 7; i++) {
@@ -764,11 +786,13 @@ async function creditAffiliateAndRakeback({ player, game_key, round_id, stakeLam
   const rakeback = (ngr * BigInt(rbBps)) / 10000n;
   const affiliateCut = (ngr * BigInt(Number(revshare_bps || 0))) / 10000n;
 
+  const normalizedGameKey = normalizeGameKey(game_key);
+
   await db.pool.query(
     `insert into affiliate_commissions
       (affiliate_code, referrer_wallet, referred_wallet, game_key, round_id, ngr_lamports, rakeback_lamports, affiliate_commission_lamports)
      values ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [ affiliate_code, referrer_wallet, ply, String(game_key||""), round_id==null?null:Number(round_id),
+    [ affiliate_code, referrer_wallet, ply, String(normalizedGameKey||""), round_id==null?null:Number(round_id),
       big(ngr.toString()), big(rakeback.toString()), big(affiliateCut.toString()) ]
   );
 
@@ -822,14 +846,13 @@ async function applyWagerContribution({ userWallet, game_key, stakeLamports }) {
     return { ok:true, counted:false, reason:"stake exceeds max-bet for active bonus" };
   }
 
-  let key = String(game_key || "").toLowerCase();
+  // normalize incoming key (aliases -> canonical)
+  let key = normalizeGameKey(game_key);
   if (!CONTRIBUTION_RATES[key]) return { ok:true, counted:false, reason:"ineligible game" };
   let rate = CONTRIBUTION_RATES[key];
 
-  if (key === "coinflip" || key === "coinflip_pvp") {
-    key = "coinflip_pvp";
-    rate = CONTRIBUTION_RATES[key];
-
+  if (key === "coinflip_pvp") {
+    // anti-collusion / unique opponent checks
     const oppRows = await db.pool.query(`
       with m as (
         select player_a as a, player_b as b, created_at from coinflip_matches where player_a=$1
@@ -884,7 +907,7 @@ router.post("/affiliates/code", async (req, res) => {
     const wallet = normalizeWallet(req.body?.wallet);
     const rakebackBps = Number(req.body?.rakebackBps);
     const revshareBps = Number(req.body?.revshareBps);
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
 
     // if exists, return it — never change (immutable policy)
     const existing = await db.pool.query(`select code, rakeback_bps, revshare_bps from affiliates where owner_wallet=$1 limit 1`, [String(wallet)]);
@@ -914,7 +937,7 @@ router.post("/affiliates/code", async (req, res) => {
 router.get("/affiliates/me/ensure-code", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
     const code = await ensureAffiliateCodeForWallet(wallet);
     res.json({ code });
   } catch (e) { res.status(500).json({ error: e?.message || String(e) }); }
@@ -934,14 +957,14 @@ router.post("/referrals/bind", async (req, res) => {
     const code = String(req.body?.code || "").toUpperCase();
     const userWallet = normalizeWallet(req.body?.userWallet);
     const deviceId = req.body?.deviceId ? String(req.body.deviceId) : null;
-    if (!code || !userWallet) return res.status(400).json({ error: "code and userWallet required" });
+if (!code || !userWallet) return res.status(400).json({ error: "Invalid input: code and userWallet required" });
 
     const { rows: aff } = await db.pool.query(`select owner_wallet from affiliates where code=$1`, [code]);
     if (!aff[0]) return res.status(400).json({ error: "invalid code" });
-    if (String(aff[0].owner_wallet) === String(userWallet)) return res.status(400).json({ error: "cannot refer yourself" });
+if (String(aff[0].owner_wallet) === String(userWallet)) return res.status(400).json({ error: "You cannot refer yourself." });
 
     const exists = await db.pool.query(`select 1 from referrals where referred_wallet=$1`, [String(userWallet)]);
-    if (exists.rows.length > 0) return res.status(200).json({ ok:true, alreadyBound:true });
+if (exists.rows.length > 0) return res.status(200).json({ ok:true, alreadyBound:true });
 
     if (deviceId) {
       await db.pool.query(
@@ -965,7 +988,7 @@ router.post("/referrals/bind", async (req, res) => {
 router.get("/referrals/me", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
     const { rows } = await db.pool.query(
       `select r.*, a.owner_wallet, a.rakeback_bps, a.revshare_bps
          from referrals r join affiliates a on a.code = r.affiliate_code
@@ -981,7 +1004,7 @@ router.post("/referrals/first-deposit", async (req, res) => {
     const userWallet = normalizeWallet(req.body?.userWallet);
     const amountSol = Number(req.body?.amountSol ?? 0);
     const txSig = req.body?.txSig || null;
-    if (!userWallet) return res.status(400).json({ error: "userWallet required" });
+    if (!userWallet) return res.status(400).json({ error: "userWallet is required" });
 
     const lam = toLamports(amountSol);
     await db.pool.query(
@@ -1090,7 +1113,7 @@ router.get("/affiliates/admin/summary", async (_req, res) => {
 router.get("/affiliates/me/summary", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
 
     await ensureAffiliateCodeForWallet(wallet);
 
@@ -1156,7 +1179,7 @@ router.get("/affiliates/me/summary", async (req, res) => {
 router.get("/affiliates/me/bonus", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
 
     // how many referred today
     const { rows: r0 } = await db.pool.query(
@@ -1218,7 +1241,7 @@ router.get("/affiliates/me/bonus", async (req, res) => {
 router.get("/affiliates/me/bonus-milestones", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
 
     // daily referrals (today)
     const { rows: r0 } = await db.pool.query(
@@ -1276,7 +1299,7 @@ router.get("/affiliates/me/bonus-milestones", async (req, res) => {
 router.get("/affiliates/me/commissions", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
 
     const { rows: best } = await db.pool.query(`
       with r as (
@@ -1331,7 +1354,7 @@ router.get("/affiliates/me/commissions", async (req, res) => {
 router.get("/affiliates/me/games", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
     const { rows } = await db.pool.query(`
       select game_key, coalesce(sum(affiliate_commission_lamports),0)::bigint as lam
       from affiliate_commissions
@@ -1434,7 +1457,7 @@ async function _wageredCteForReferrals(db) {
 router.get("/affiliates/me/activity", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
 
     const wCte = await _wageredCteForReferrals(db);
 
@@ -1507,7 +1530,7 @@ router.post("/affiliates/link/click", async (req, res) => {
     const landingUrl = req.body?.landingUrl || null;
     const refererUrl = req.body?.refererUrl || null;
 
-    if (!codeUp) return res.status(400).json({ error: "code required" });
+    if (!codeUp) return res.status(400).json({ error: "code is required" });
 
     const { rows: aff } = await db.pool.query(`select owner_wallet from affiliates where code=$1 limit 1`, [codeUp]);
     if (!aff[0]) return res.status(400).json({ error: "invalid code" });
@@ -1569,7 +1592,7 @@ router.get("/r/:code", async (req, res) => {
 router.get("/affiliates/me/clicks", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
 
     const { rows } = await db.pool.query(
       `select id, code, clicked_wallet, device_id, ip::text as ip, user_agent, referer, landing_url, created_at
@@ -1597,7 +1620,7 @@ router.get("/affiliates/me/clicks", async (req, res) => {
 router.get("/affiliates/me/link", async (req,res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
 
     const referralCode = await ensureAffiliateCodeForWallet(wallet);
 
@@ -1623,9 +1646,15 @@ router.get("/affiliates/me/link", async (req,res) => {
   } catch (e) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 
+
 // ---------- EXPORTS for WS handlers ----------
 router.creditAffiliateAndRakeback = creditAffiliateAndRakeback;
 router.applyWagerContribution = applyWagerContribution;
 router.activateWelcomeBonus = activateWelcomeBonus;
+// at bottom
+router.creditAffiliateAndRakeback = async function(args) {
+  return affiliateService.creditAffiliateAndRakeback(args);
+};
+
 
 module.exports = router;

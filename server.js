@@ -82,7 +82,7 @@ function getClientIp(req) {
 }
 
 const SITE_URL =
-  process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
+  process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://flipverse-web.vercel.app";
 const PORT = Number(process.env.PORT || 4000);
 
 // ---------- Price helper (SOL→USDT) ----------
@@ -177,7 +177,7 @@ async function main() {
   app.set("trust proxy", true);
 
   // ---------- CORS (Frontend: localhost + Vercel) ----------
-  const defaultAllowed = ["http://localhost:3000", "https://flipverse-web.vercel.app"];
+  const defaultAllowed = ["http://flipverse-web.vercel.app", "http://flipverse-web.vercel.app"];
   const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || defaultAllowed.join(","))
     .split(",")
     .map((s) => s.trim())
