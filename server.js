@@ -8,6 +8,7 @@ const cors = require("cors");
 const bodyParser = require("body-parser");
 const { PublicKey, Connection } = require("@solana/web3.js");
 const path = require("path");
+const { getMessage } = require("./messageUtil");
 
 // small fetch shim (Node 18+ has global fetch)
 const fetch =
@@ -341,18 +342,26 @@ async function main() {
         out["coinflip"].plays += Number(cf.rows[0].plays || 0);
       }
 
-      if (await db._tableExistsUnsafe?.("slots_spins")) {
-        const ss = await db.pool.query(
-          `select coalesce(sum(bet_amount - payout),0)::text as rev_sol,
-                  count(*)::int as plays
-           from slots_spins`
-        );
-        const usd =
-          Number(ss.rows[0].rev_sol || 0) * Number(process.env.USD_PER_SOL || 200);
-        out["slots"] = out["slots"] || { revenue: 0, plays: 0 };
-        out["slots"].revenue += usd;
-        out["slots"].plays += Number(ss.rows[0].plays || 0);
-      }
+     if (await db._tableExistsUnsafe?.("slots_spins")) {
+  // rev_lamports is the net in LAMPORTS (bet - payout). Convert to SOL by dividing by 1e9.
+  const ss = await db.pool.query(
+    `select coalesce(sum(bet_amount - payout),0)::numeric as rev_lamports,
+            count(*)::int as plays
+     from slots_spins`
+  );
+
+  // Convert lamports -> SOL
+  const revLamports = Number(ss.rows[0].rev_lamports || 0);
+  const revSol = revLamports / 1e9;
+
+  // Convert SOL -> USD
+  const usd = revSol * Number(process.env.USD_PER_SOL || 200);
+
+  out["slots"] = out["slots"] || { revenue: 0, plays: 0 };
+  out["slots"].revenue += usd;
+  out["slots"].plays += Number(ss.rows[0].plays || 0);
+}
+
     } catch (err) {
       console.error("[computeGameMetrics] error:", err.message);
     }
@@ -715,6 +724,242 @@ async function main() {
     attachBotFeed?.(io);
   } catch {}
 
+  // -------------------------
+  // PERSISTENT ADMIN SETTINGS
+  // -------------------------
+  //
+  // NOTE: This block requires `bcrypt` in your dependencies:
+  //   npm i bcrypt
+  //
+  // It persists admin profile, admin credentials (bcrypt hashed), and maintenance
+  // configuration into a small `admin_settings` key/value table (jsonb).
+  //
+  // Protection: set ADMIN_API_KEY in your .env and call endpoints with:
+  //   Authorization: Bearer <ADMIN_API_KEY>
+  //
+  // If ADMIN_API_KEY is not set, requireAdmin will allow (dev mode) but log a warning.
+  //
+  // Insert this block here so `io` exists for socket emits.
+
+  try {
+    const bcrypt = require("bcrypt");
+    const SALT_ROUNDS = Number(process.env.PASSWORD_SALT_ROUNDS || 10);
+    // Ensure admin_settings table exists
+    async function ensureAdminSettingsTable() {
+      try {
+        await db.pool.query(`
+          create table if not exists admin_settings (
+            key text primary key,
+            value jsonb not null,
+            updated_at timestamptz not null default now()
+          );
+        `);
+      } catch (err) {
+        console.warn("[ensureAdminSettingsTable] failed:", err?.message || err);
+      }
+    }
+    ensureAdminSettingsTable().catch((e) => console.warn("[admin_settings init] error:", e?.message || e));
+
+    async function readAdminSetting(key) {
+      const { rows } = await db.pool.query(
+        `select value from admin_settings where key = $1 limit 1`,
+        [String(key)]
+      );
+      return rows[0] ? rows[0].value : null;
+    }
+
+    async function writeAdminSetting(key, obj) {
+      await db.pool.query(
+        `insert into admin_settings (key, value) values ($1, $2)
+         on conflict (key) do update set value = EXCLUDED.value, updated_at = now()`,
+        [String(key), obj]
+      );
+      return obj;
+    }
+
+    // Admin auth middleware
+    function requireAdmin(req, res, next) {
+      try {
+        if (!process.env.ADMIN_API_KEY) {
+          console.warn("[requireAdmin] WARNING: ADMIN_API_KEY not set — admin endpoints are open (dev mode)");
+          return next();
+        }
+        const auth = (req.headers["authorization"] || "");
+        const m = String(auth).match(/^Bearer\s+(.+)$/i);
+        if (!m) return res.status(401).json({ error: "missing authorization" });
+        const token = m[1];
+        if (token !== process.env.ADMIN_API_KEY) return res.status(403).json({ error: "forbidden" });
+        return next();
+      } catch (e) {
+        return res.status(500).json({ error: "internal" });
+      }
+    }
+
+    // Admin profile helpers
+    async function getAdminProfile() {
+      const profile = await readAdminSetting("admin_profile");
+      if (profile) return profile;
+      const defaultProfile = {
+        id: "admin",
+        name: process.env.ADMIN_NAME || "Admin User",
+        email: process.env.ADMIN_EMAIL || "admin@flipverse.comm",
+        phone: process.env.ADMIN_PHONE || "+1 (555) 123-4567",
+        role: process.env.ADMIN_ROLE || "Super Admin",
+        joinDate: process.env.ADMIN_JOIN_DATE || new Date().toISOString(),
+      };
+      await writeAdminSetting("admin_profile", defaultProfile);
+      return defaultProfile;
+    }
+
+    async function getAdminCredentials() {
+      const cred = await readAdminSetting("admin_credentials");
+      if (cred && cred.passwordHash) return cred;
+      if (process.env.ADMIN_PASSWORD_HASH) {
+        const c = { passwordHash: process.env.ADMIN_PASSWORD_HASH };
+        await writeAdminSetting("admin_credentials", c);
+        return c;
+      }
+      const c = { passwordHash: null };
+      await writeAdminSetting("admin_credentials", c);
+      return c;
+    }
+
+    // Maintenance helpers
+    const MAINT_KEY = "maintenance";
+    async function getMaintenanceConfig() {
+      const stored = await readAdminSetting(MAINT_KEY);
+      const base = {
+        isEnabled: false,
+        message: "Site is undergoing scheduled maintenance. We'll be back shortly.",
+        scheduledStart: null,
+        scheduledEnd: null,
+        allowAdminAccess: true,
+        redirectUrl: "/maintenance",
+        notifyUsers: true,
+        notificationMinutes: 30,
+      };
+      if (!stored) {
+        await writeAdminSetting(MAINT_KEY, base);
+        return base;
+      }
+      return Object.assign(base, stored);
+    }
+
+    // --- Endpoints: admin profile / credentials / maintenance ---
+    app.get("/admin/me", requireAdmin, async (req, res) => {
+      try {
+        const p = await getAdminProfile();
+        return res.json(p);
+      } catch (e) {
+        return res.status(500).json({ error: String(e?.message || e) });
+      }
+    });
+
+    app.put("/admin/users/:id", requireAdmin, async (req, res) => {
+      try {
+        const patch = req.body || {};
+        const allowed = ["name", "email", "phone", "role", "joinDate"];
+        const cur = await getAdminProfile();
+        for (const k of allowed) {
+          if (Object.prototype.hasOwnProperty.call(patch, k)) cur[k] = patch[k];
+        }
+        await writeAdminSetting("admin_profile", cur);
+        try { io.emit("admin.user.updated", cur); } catch (e) {}
+        return res.json(cur);
+      } catch (e) {
+        return res.status(500).json({ error: String(e?.message || e) });
+      }
+    });
+
+    // Change password
+    // body: { currentPassword, newPassword }
+    app.put("/admin/users/:id/password", requireAdmin, async (req, res) => {
+      try {
+        const { currentPassword, newPassword } = req.body || {};
+        if (!newPassword || typeof newPassword !== "string" || newPassword.length < 8) {
+          return res.status(400).json({ error: "newPassword required (min 8 chars)" });
+        }
+
+        const creds = await getAdminCredentials();
+        if (creds.passwordHash) {
+          if (!currentPassword) return res.status(400).json({ error: "currentPassword required" });
+          const ok = await bcrypt.compare(String(currentPassword), String(creds.passwordHash));
+          if (!ok) return res.status(403).json({ error: "currentPassword incorrect" });
+        } else {
+          // no stored password yet - allow set (protected by ADMIN_API_KEY via requireAdmin)
+        }
+
+        const hash = await bcrypt.hash(String(newPassword), SALT_ROUNDS);
+        await writeAdminSetting("admin_credentials", { passwordHash: hash });
+        return res.json({ ok: true });
+      } catch (e) {
+        return res.status(500).json({ error: String(e?.message || e) });
+      }
+    });
+
+    // Maintenance endpoints
+    app.get("/admin/maintenance", requireAdmin, async (req, res) => {
+      try {
+        const cfg = await getMaintenanceConfig();
+        return res.json(cfg);
+      } catch (e) {
+        return res.status(500).json({ error: String(e?.message || e) });
+      }
+    });
+
+    app.put("/admin/maintenance", requireAdmin, async (req, res) => {
+      try {
+        const patch = req.body || {};
+        const cur = await getMaintenanceConfig();
+
+        const allowed = {
+          isEnabled: "boolean",
+          message: "string",
+          scheduledStart: "string",
+          scheduledEnd: "string",
+          allowAdminAccess: "boolean",
+          redirectUrl: "string",
+          notifyUsers: "boolean",
+          notificationMinutes: "number",
+        };
+
+        for (const k of Object.keys(allowed)) {
+          if (Object.prototype.hasOwnProperty.call(patch, k)) {
+            const t = allowed[k];
+            let v = patch[k];
+            if (v == null || v === "") {
+              cur[k] = null;
+              continue;
+            }
+            if (t === "boolean") cur[k] = Boolean(v);
+            else if (t === "number") cur[k] = Number(v);
+            else cur[k] = String(v);
+          }
+        }
+
+        await writeAdminSetting(MAINT_KEY, cur);
+        try { io.emit("admin.maintenance.updated", cur); } catch (e) {}
+        return res.json(cur);
+      } catch (e) {
+        return res.status(500).json({ error: String(e?.message || e) });
+      }
+    });
+
+    app.post("/admin/maintenance/toggle", requireAdmin, async (req, res) => {
+      try {
+        const cur = await getMaintenanceConfig();
+        cur.isEnabled = !Boolean(cur.isEnabled);
+        await writeAdminSetting(MAINT_KEY, cur);
+        try { io.emit("admin.maintenance.updated", cur); } catch (e) {}
+        return res.json(cur);
+      } catch (e) {
+        return res.status(500).json({ error: String(e?.message || e) });
+      }
+    });
+  } catch (err) {
+    console.warn("[admin settings block] failed to init:", err?.message || err);
+  }
+
   // ----- BAN GATE -----
   io.use(async (socket, next) => {
     try {
@@ -796,12 +1041,32 @@ async function main() {
     console.warn(e);
   }
 
+  // mount promos admin router (add this)
+  try {
+    const promosAdminRouter = require("./admin_promotion_router"); // <-- adjust path if needed
+    app.use("/promo", promosAdminRouter); // admin routes are defined as "/admin/..." inside that router
+    console.log("Promos ADMIN router mounted at /promo/admin");
+  } catch (e) {
+    console.warn("promos_admin_router not found / failed to mount:", e?.message || e);
+  }
+
   try {
     const welcomeBonusRouter = require("./welcome_bonus_router");
     app.use("/promo/welcome", welcomeBonusRouter);
   } catch (e) {
     console.warn("welcome_bonus_router not found / failed to mount:", e?.message || e);
   }
+
+    // mount dev admin login route (returns ADMIN_API_KEY on success)
+  try {
+    const adminAuthRouter = require('./admin_auth_router'); // path relative to server.js
+    // mount it under /admin so that router's /login maps to /admin/login
+    app.use('/admin', adminAuthRouter);
+    console.log('admin_auth_router mounted at /admin');
+  } catch (e) {
+    console.warn('admin_auth_router not mounted:', e?.message || e);
+  }
+
 
   server.listen(PORT, () => {
     console.log(

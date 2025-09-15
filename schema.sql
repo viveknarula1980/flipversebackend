@@ -709,3 +709,32 @@ ALTER TABLE welcome_bonuses
   ADD COLUMN IF NOT EXISTS first_deposit_lamports BIGINT DEFAULT 0,
   ADD COLUMN IF NOT EXISTS claimed BOOLEAN DEFAULT false,
   ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP WITH TIME ZONE;
+
+
+
+-- promotions_table.sql
+CREATE TABLE IF NOT EXISTS promotions (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  code TEXT,
+  type TEXT NOT NULL,          -- e.g. welcome, reload, free_spins, vip, rakeback, etc.
+  status TEXT NOT NULL,        -- active, inactive, scheduled, draft
+  trigger TEXT,                -- signup, deposit, wager, code, loss, etc.
+  reward_type TEXT,            -- bonus, cashback, free_spins, other
+  reward_value NUMERIC DEFAULT 0, -- numeric value (percent or USD or spins count depending on reward_unit)
+  reward_unit TEXT DEFAULT 'USD', -- "percentage" | "USD" | "spins"
+  max_reward NUMERIC DEFAULT 0,
+  min_deposit NUMERIC DEFAULT 0,
+  wagering NUMERIC DEFAULT 0,  -- wagering or WR units
+  valid_from TIMESTAMP WITH TIME ZONE,
+  valid_to TIMESTAMP WITH TIME ZONE,
+  usage_count INTEGER DEFAULT 0,
+  usage_limit INTEGER,
+  description TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- optional index for faster search by name/code
+CREATE INDEX IF NOT EXISTS promotions_name_idx ON promotions (lower(name));
+CREATE INDEX IF NOT EXISTS promotions_code_idx ON promotions (lower(code));
