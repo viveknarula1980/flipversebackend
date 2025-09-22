@@ -1,7 +1,7 @@
 // bot_engine.js
 // Simulated activity feed + admin endpoints.
 // Socket namespace: /fake-feed   |  Event: 'activity'
-// REST: /admin/bot/config (GET/POST), /admin/bot/enable (POST), /admin/bot/stats (GET)
+// REST: /admin/bot/config (GET/POST), /admin/bot/enable (POST), /admin/bot/stats (GET), /admin/bot/recent (GET)
 
 const DEFAULT_CONFIG = {
   enabled: process.env.DEMO_FEED_ENABLED === "true",
@@ -37,6 +37,21 @@ const STATS = {
   payoutSol: 0,
   usersSeen: new Map(),
 };
+
+// Recent buffer (server-side) — so first-time visitors get previous events
+const MAX_RECENT = 200;
+const RECENT = []; // keep newest at end
+
+function pushRecent(a) {
+  RECENT.push(a);
+  if (RECENT.length > MAX_RECENT) RECENT.shift();
+}
+
+function getRecentActivities(limit = 50) {
+  const slice = RECENT.slice(-Math.max(0, Math.min(limit, RECENT.length)));
+  // return newest-first to match client expectation
+  return slice.slice().reverse();
+}
 
 function rand(min, max) { return Math.random() * (max - min) + min; }
 function randInt(min, max) { return Math.floor(rand(min, max + 1)); }
@@ -81,7 +96,18 @@ function _loopOnce() {
   const feed = IO.of(FEED_NS);
   const ev = generateEvent();
   _updateStats(ev);
-  feed.emit("activity", ev);
+
+  // push to server-side recent buffer
+  pushRecent(ev);
+
+  // emit to connected clients
+  try {
+    feed.emit("activity", ev);
+  } catch (e) {
+    // swallow errors so loop continues
+    console.warn("[bot_engine] emit failed:", e?.message || e);
+  }
+
   TIMER = setTimeout(_loopOnce, nextDelay());
 }
 
@@ -98,9 +124,30 @@ function stopLoop() {
 
 function attachBotFeed(io) {
   IO = io;
-  io.of(FEED_NS).on("connection", (socket) => {
+  const ns = io.of(FEED_NS);
+
+  ns.on("connection", (socket) => {
+    // client gets a hello + initial snapshot
     socket.emit("hello", { simulated: true, message: "Simulated activity feed (demo mode)" });
+
+    // send snapshot: stats + recent activities
+    try {
+      socket.emit("snapshot", { stats: getStats(), recent: getRecentActivities(100) });
+    } catch (e) {}
+
+    // handle client asking for recent (optional)
+    socket.on("fetch_recent", (limit = 50, cb) => {
+      try {
+        const res = getRecentActivities(Number(limit || 50));
+        if (typeof cb === "function") cb(null, res);
+        else socket.emit("recent", res);
+      } catch (err) {
+        if (typeof cb === "function") cb(String(err));
+      }
+    });
   });
+
+  // If enabled, start loop (server will run generative feed even if no clients connected)
   if (CONFIG.enabled) startLoop();
 }
 
@@ -180,6 +227,17 @@ function attachBotAdmin(app) {
     catch (e) { res.status(400).json({ error: String(e?.message || e) }); }
   });
   app.get("/admin/bot/stats", (_req, res) => res.json(getStats()));
+
+  // NEW: recent activities endpoint so clients can fetch initial history
+  app.get("/admin/bot/recent", (req, res) => {
+    try {
+      const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
+      const recent = getRecentActivities(limit);
+      res.json(recent);
+    } catch (e) {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
 }
 
-module.exports = { attachBotFeed, attachBotAdmin, setConfig, getConfig, getStats };
+module.exports = { attachBotFeed, attachBotAdmin, setConfig, getConfig, getStats, getRecentActivities };

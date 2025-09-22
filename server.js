@@ -6,7 +6,12 @@ const { Server } = require("socket.io");
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
-const { PublicKey, Connection } = require("@solana/web3.js");
+const {
+  PublicKey,
+  Connection,
+  TransactionMessage,
+  VersionedTransaction,
+} = require("@solana/web3.js");
 const path = require("path");
 const { getMessage } = require("./messageUtil");
 
@@ -178,7 +183,7 @@ async function main() {
   app.set("trust proxy", true);
 
   // ---------- CORS (Frontend: localhost + Vercel) ----------
-  const defaultAllowed = ["http://flipverse-web.vercel.app", "http://flipverse-web.vercel.app"];
+  const defaultAllowed = ["http://flipverse-web.vercel.app","http://51.20.249.35:3000", "http://localhost:3000"];
   const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || defaultAllowed.join(","))
     .split(",")
     .map((s) => s.trim())
@@ -973,6 +978,16 @@ async function main() {
     }
   });
 
+  // Load solana instruction helper (you already uploaded `solana_anchor_ix.js`)
+  // This module should export a function to build the withdraw instruction, e.g.:
+  //    ixWithdraw({ programId, player, userVault, amountLamports }) -> TransactionInstruction
+  let solanaAnchorIx = null;
+  try {
+    solanaAnchorIx = require("./solana_anchor_ix");
+  } catch (e) {
+    console.warn("[server] solana_anchor_ix helper not found. Ensure ./solana_anchor_ix.js exists and exports ixWithdraw().");
+  }
+
   io.on("connection", (socket) => {
     socket.onAny(async (_event, ...args) => {
       try {
@@ -983,6 +998,98 @@ async function main() {
         }
       } catch {}
     });
+
+    //
+    // NEW: handle withdraw prepare requests
+    //
+    // Client emits: socket.emit("vault:withdraw_prepare", { player, amountLamports, withdrawAddress })
+    // Server replies with:
+    //   - socket.emit("vault:withdraw_tx", { transactionBase64 })  // unsigned versioned tx (client signs & sends)
+    //   - or socket.emit("vault:error", { message })
+    //
+    socket.on("vault:withdraw_prepare", async (data) => {
+      try {
+        if (!data || typeof data !== "object") {
+          socket.emit("vault:error", { message: "invalid request" });
+          return;
+        }
+
+        const player = String(data.player || data.wallet || data.address || "");
+        const amountLamports = Number(data.amountLamports || 0);
+        const withdrawAddress = String(data.withdrawAddress || player);
+
+        if (!isMaybeBase58(player) || !isMaybeBase58(withdrawAddress)) {
+          socket.emit("vault:error", { message: "invalid player / withdraw address" });
+          return;
+        }
+        if (!Number.isFinite(amountLamports) || amountLamports <= 0) {
+          socket.emit("vault:error", { message: "invalid amountLamports" });
+          return;
+        }
+
+        // derive the user_vault PDA & check balance
+        let userVault;
+        try {
+          userVault = deriveUserVaultPda(player);
+        } catch (e) {
+          socket.emit("vault:error", { message: "bad player pubkey" });
+          return;
+        }
+
+        const pdaBalance = await connection.getBalance(userVault, "confirmed");
+        if (pdaBalance < amountLamports) {
+          socket.emit("vault:error", { message: "insufficient vault balance" });
+          return;
+        }
+
+        // Build withdraw instruction. This code assumes solana_anchor_ix.ixWithdraw exists and returns a TransactionInstruction.
+        if (!solanaAnchorIx || typeof solanaAnchorIx.ixWithdraw !== "function") {
+          socket.emit("vault:error", { message: "server missing withdraw instruction builder (solana_anchor_ix.ixWithdraw)" });
+          return;
+        }
+
+        const ix = solanaAnchorIx.ixWithdraw({
+          programId: PROGRAM_ID.toBase58(),
+          player: new PublicKey(player),
+          userVault: userVault,
+          amount: amountLamports,
+        });
+
+        // create a versioned message where the fee payer is the player's wallet
+        const { blockhash } = await connection.getLatestBlockhash("confirmed");
+
+        const messageV0 = new TransactionMessage({
+          payerKey: new PublicKey(player),
+          recentBlockhash: blockhash,
+          instructions: [ix],
+        }).compileToV0Message();
+
+        const vtx = new VersionedTransaction(messageV0);
+
+        // serialize unsigned vtx to send to client for signing
+        const txBase64 = Buffer.from(vtx.serialize()).toString("base64");
+
+        // optional: record prepare activity
+        try {
+          await db.recordActivity({
+            user: player,
+            action: "withdraw_prepare",
+            amount: Number(amountLamports) / 1e9,
+            tx_hash: null,
+          });
+        } catch (e) {
+          console.warn("[db.recordActivity] withdraw_prepare failed:", e?.message || e);
+        }
+
+        // send back tx
+        socket.emit("vault:withdraw_tx", { transactionBase64: txBase64 });
+      } catch (err) {
+        console.error("[vault:withdraw_prepare] error:", err?.message || err);
+        try {
+          socket.emit("vault:error", { message: String(err?.message || err) });
+        } catch {}
+      }
+    }); // end vault:withdraw_prepare
   });
 
   // WS mounts (if present)

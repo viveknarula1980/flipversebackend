@@ -1,9 +1,0 @@
- id |                    player                    | bet_amount_lamports | bet_type | target | roll | payout_lamports |     nonce     | expiry_unix | signature_base58 |      status      | tx_sig |          created_at           
-----+----------------------------------------------+---------------------+----------+--------+------+-----------------+---------------+-------------+------------------+------------------+--------+-------------------------------
-  1 | HrYFHpYUqqEbVvgvPWQdbBnUhDYUgtWykbfTbdqYimuL |             1000000 |        0 |     50 |   60 |               0 | 1755516184949 |  1755516304 |                  | prepared_resolve |        | 2025-08-18 11:23:05.470516+00
-  2 | HrYFHpYUqqEbVvgvPWQdbBnUhDYUgtWykbfTbdqYimuL |             1000000 |        1 |     50 |   21 |               0 | 1755516245430 |  1755516365 |                  | prepared_resolve |        | 2025-08-18 11:24:05.659673+00
-  3 | HrYFHpYUqqEbVvgvPWQdbBnUhDYUgtWykbfTbdqYimuL |             1000000 |        0 |     50 |    0 |               0 | 1755585186811 |  1755585306 |                  | prepared_lock    |        | 2025-08-19 06:33:07.503179+00
-  4 | HrYFHpYUqqEbVvgvPWQdbBnUhDYUgtWykbfTbdqYimuL |             1000000 |        0 |     50 |    4 |         2020408 | 1755590438335 |  1755590558 |                  | prepared_resolve |        | 2025-08-19 08:00:38.569972+00
-  5 | HrYFHpYUqqEbVvgvPWQdbBnUhDYUgtWykbfTbdqYimuL |            64000000 |        0 |     50 |   83 |               0 | 1755590462657 |  1755590582 |                  | prepared_resolve |        | 2025-08-19 08:01:02.775215+00
-(5 rows)
-

@@ -357,6 +357,7 @@
 
 // backend/dice_ws.js
 // backend/dice_ws.js
+// dice_ws.js (updated for provably-fair)
 const {
   PublicKey,
   VersionedTransaction,
@@ -382,13 +383,17 @@ const {
   ixResolve,
 } = require("./solana_anchor_ix");
 
-const { roll1to100 } = require("./rng");
+// removed roll1to100 usage - use HMAC-based provably-fair RNG
+// const { roll1to100 } = require("./rng");
+
 const {
   ADMIN_PK,
   buildMessageBytes,
   signMessageEd25519,
   getServerKeypair,
 } = require("./signer");
+
+const crypto = require("crypto");
 
 const DB = global.db || require("./db");
 const { precheckOrThrow } = require("./bonus_guard");
@@ -408,13 +413,34 @@ function computePayoutLamports({ betLamports, rtp_bps, win_odds }) {
 
 const dicePending = new Map();
 
+/**
+ * HMAC_SHA256(serverSeedHex, messageStr) => Buffer
+ */
+function hmacSha256Buf(serverSeedHex, messageStr) {
+  return crypto.createHmac("sha256", Buffer.from(serverSeedHex, "hex")).update(String(messageStr)).digest();
+}
+
+/**
+ * Derive dice roll 1..100 using HMAC(serverSeed, clientSeed + nonce)
+ * This is deterministic and verifiable once serverSeed is revealed.
+ */
+function deriveDiceRoll({ serverSeedHex, clientSeed, nonce }) {
+  const msg = String(clientSeed || "") + String(nonce);
+  const buf = hmacSha256Buf(serverSeedHex, msg);
+  // use first 4 bytes as uint32
+  const v = buf.readUInt32BE(0) >>> 0;
+  const roll = (v % 100) + 1; // 1..100
+  // also return saltedHex for debug/verification
+  return { roll, hmacHex: buf.toString("hex") };
+}
+
 function attachDice(io) {
   io.on("connection", (socket) => {
     socket.on("register", ({ player }) => {
       socket.data.player = String(player || "guest");
     });
 
-    // ---- Vault ops (single user vault across games) ----
+    // ---- Vault ops (kept unchanged) ----
     socket.on("vault:activate_prepare", async ({ player, initialDepositLamports = 0 }) => {
       try {
         if (!player) return socket.emit("vault:error", { code: "NO_PLAYER", message: "player required" });
@@ -489,8 +515,9 @@ function attachDice(io) {
       }
     });
 
-    // ---- Dice place ----
-    socket.on("dice:place", async ({ player, betAmountLamports, betType, targetNumber }) => {
+    // ---- Dice place (provably-fair added) ----
+    // Accepts optional clientSeed parameter (string). If client doesn't provide it, we set empty string.
+    socket.on("dice:place", async ({ player, betAmountLamports, betType, targetNumber, clientSeed = "" }) => {
       try {
         if (!player) return socket.emit("dice:error", { code: "NO_PLAYER", message: "player required" });
 
@@ -531,19 +558,13 @@ function attachDice(io) {
         const feePayer = await getServerKeypair();
         const cuPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
         const cuLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 350_000 });
-        await precheckOrThrow({
-  userWallet: player,
-  stakeLamports: String(betLamports),
-  gameKey: "dice",
-});
 
-        // before building lock/tx:
-await precheckOrThrow({
-  userWallet: player,                 // base58
-  stakeLamports: betLamports,         // BigInt or Number
-  gameKey: "dice",                    // "crash","plinko","mines","memeslot","coinflip_pvp"
-  // autoCashoutX: 1.1                 // e.g. for crash guard hint, optional
-});
+        await precheckOrThrow({
+          userWallet: player,
+          stakeLamports: betLamports,
+          gameKey: "dice",
+        });
+
         const lockIx = ixPlaceBetFromVault({
           programId: PROGRAM_ID,
           player: playerPk,
@@ -574,8 +595,23 @@ await precheckOrThrow({
         const sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
         await connection.confirmTransaction(sig, "confirmed");
 
-        dicePending.set(nonce, { player, betLamports, betTypeNum, target });
+        // ====== PROVABLY-FAIR: create serverSeed and serverSeedHash and store in memory pending map ======
+        const serverSeedBuf = crypto.randomBytes(32);
+        const serverSeedHex = serverSeedBuf.toString("hex");
+        const serverSeedHash = crypto.createHash("sha256").update(serverSeedBuf).digest("hex");
 
+        // store everything required to resolve deterministically later
+        dicePending.set(nonce, {
+          player,
+          betLamports: betLamports,
+          betTypeNum,
+          target,
+          clientSeed: String(clientSeed || ""),
+          serverSeedHex,
+          serverSeedHash,
+        });
+
+        // record bet in DB (status prepared_lock). we don't persist serverSeed to DB here (no schema change).
         await DB.recordBet?.({
           player: playerPk.toBase58(),
           amount: String(betLamports),
@@ -588,13 +624,15 @@ await precheckOrThrow({
           signature_base58: sig,
         }).catch(() => {});
 
-        socket.emit("dice:locked", { nonce: String(nonce), txSig: sig });
+        // emit locked with serverSeedHash (commitment) so clients can see hash BEFORE seed reveal
+        socket.emit("dice:locked", { nonce: String(nonce), txSig: sig, serverSeedHash });
+
       } catch (e) {
         socket.emit("dice:error", { code: "PLACE_FAIL", message: String(e.message || e) });
       }
     });
 
-    // ---- Dice resolve ----
+    // ---- Dice resolve (uses HMAC with serverSeed + clientSeed + nonce) ----
     socket.on("dice:resolve", async ({ player, nonce }) => {
       try {
         if (!player) return socket.emit("dice:error", { code: "NO_PLAYER", message: "player required" });
@@ -604,14 +642,36 @@ await precheckOrThrow({
         let ctx = dicePending.get(Number(nonce));
         if (!ctx && typeof DB.getBetByNonce === "function") {
           const row = await DB.getBetByNonce(Number(nonce)).catch(() => null);
-          if (row) ctx = { player, betLamports: BigInt(row.bet_amount_lamports), betTypeNum: Number(row.bet_type), target: Number(row.target) };
+          if (row) {
+            // fallback: we can still compute from DB row if clientSeed/serverSeed were persisted earlier — but they are not currently.
+            ctx = { player, betLamports: BigInt(row.bet_amount_lamports), betTypeNum: Number(row.bet_type), target: Number(row.target), clientSeed: "" };
+          }
         }
         if (!ctx) return socket.emit("dice:error", { code: "NOT_FOUND", message: "no prepared dice bet for nonce" });
 
         let rtp_bps = 9900;
         try { const rules = await DB.getRules?.(); if (rules?.rtp_bps) rtp_bps = Number(rules.rtp_bps); } catch {}
 
-        const roll = roll1to100();
+        // ===== derive roll deterministically using HMAC(serverSeed, clientSeed + nonce) =====
+        // If ctx.serverSeedHex exists (from in-memory), use it; otherwise fallback to non-HMAC RNG (legacy)
+        let roll, hmacHex;
+        if (ctx.serverSeedHex) {
+          const out = deriveDiceRoll({ serverSeedHex: ctx.serverSeedHex, clientSeed: ctx.clientSeed, nonce: Number(nonce) });
+          roll = out.roll;
+          hmacHex = out.hmacHex;
+        } else {
+          // Legacy fallback (should be rare); uses RNG module if present
+          // (This path won't be provably-fair)
+          try {
+            const { roll1to100 } = require("./rng");
+            roll = roll1to100();
+            hmacHex = null;
+          } catch {
+            roll = Math.floor(Math.random() * 100) + 1;
+            hmacHex = null;
+          }
+        }
+
         const win_odds = ctx.betTypeNum === 0 ? ctx.target - 1 : 100 - ctx.target;
         if (win_odds < 1 || win_odds > 99) throw new Error("Invalid win odds");
         const win = ctx.betTypeNum === 0 ? roll < ctx.target : roll > ctx.target;
@@ -672,22 +732,42 @@ await precheckOrThrow({
         const sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
         await connection.confirmTransaction(sig, "confirmed");
 
+        // record game round & activity
         await DB.recordGameRound?.({
           game_key: "dice",
           player,
           nonce: Number(nonce),
           stake_lamports: Number(ctx.betLamports),
           payout_lamports: Number(payoutLamports),
-          result_json: { roll, betType: ctx.betTypeNum === 0 ? "under" : "over", target: ctx.target, win },
+          result_json: { roll, betType: ctx.betTypeNum === 0 ? "under" : "over", target: ctx.target, win, hmacHex: hmacHex || null },
         }).catch(() => {});
         if (payoutLamports > 0) {
           await DB.recordActivity?.({ user: player, action: "Dice win", amount: (Number(payoutLamports) / 1e9).toFixed(4) }).catch(() => {});
         }
+
         if (typeof DB.updateBetPrepared === "function") {
-          await DB.updateBetPrepared({ nonce: Number(nonce), roll, payout: Number(payoutLamports), resolve_sig: sig }).catch(() => {});
+          // Update roll/payout in bets table if present
+          await DB.updateBetPrepared({ nonce: Number(nonce), roll, payout: Number(payoutLamports) }).catch(() => {});
         }
 
+        // emit resolved result
         socket.emit("dice:resolved", { nonce: String(nonce), roll, win, payoutLamports: Number(payoutLamports), txSig: sig });
+
+        // ==== REVEAL seed for provable fairness (emit only AFTER resolve) ====
+        // If we have an in-memory serverSeed, reveal it for client-side verification.
+        if (ctx.serverSeedHex) {
+          socket.emit("dice:reveal_seed", {
+            nonce: String(nonce),
+            serverSeedHex: ctx.serverSeedHex,
+            clientSeed: ctx.clientSeed,
+            formula: "HMAC_SHA256(serverSeed, clientSeed + nonce)",
+            hmacHex: hmacHex || null,
+          });
+        } else {
+          // no serverSeed available (legacy) - do not emit
+        }
+
+        // cleanup
         dicePending.delete(Number(nonce));
       } catch (e) {
         socket.emit("dice:error", { code: "RESOLVE_FAIL", message: String(e.message || e) });
@@ -697,5 +777,3 @@ await precheckOrThrow({
 }
 
 module.exports = { attachDice };
-
-

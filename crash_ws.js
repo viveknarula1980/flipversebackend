@@ -368,6 +368,14 @@
 // backend/crash_ws.js — Crash WS (client-signed lock, server-sent resolve)
 // backend/crash_ws.js — server-sent lock + server-sent resolve (no Phantom on Play)
 // backend/crash_ws.js — server-sent lock + server-sent resolve (no Phantom on Play)
+// crash.js
+// Server-side Crash game handler (WebSocket). Provably-fair reveal aligned with Dice:
+// emits serverSeedHash on lock; after resolve emits serverSeedHex, clientSeed, formula, hmacHex, crashAtMul.
+
+// crash.js
+// Crash game WS handler — emits full resolve/reveal data for both cashout and crash.
+// Expects helper modules: ./solana, ./solana_anchor_ix, ./signer, ./db, ./bonus_guard
+
 const crypto = require("crypto");
 const {
   PublicKey,
@@ -378,7 +386,6 @@ const {
 
 const DB = global.db || require("./db");
 const { precheckOrThrow } = require("./bonus_guard");
-
 
 const {
   connection,
@@ -398,7 +405,7 @@ const {
   getServerKeypair,
 } = require("./signer");
 
-// ----- RNG helpers ------------------------------------------------------------
+// ---------------- RNG / provable helpers --------------------------------------
 function u64From(buf) {
   return (BigInt(buf[0]) << 56n) |
          (BigInt(buf[1]) << 48n) |
@@ -409,17 +416,28 @@ function u64From(buf) {
          (BigInt(buf[6]) << 8n)  |
           BigInt(buf[7]);
 }
-function deriveCrashPoint({ serverSeed, clientSeed, nonce }) {
+
+/**
+ * deriveCrashPointDetailed({ serverSeed, clientSeed, nonce })
+ * returns { crashAtMul, hmacHex, n64, r }
+ */
+function deriveCrashPointDetailed({ serverSeed, clientSeed, nonce }) {
   const h = crypto.createHmac("sha256", serverSeed)
     .update(String(clientSeed || ""))
     .update(Buffer.from(String(nonce)))
     .digest();
+  const hmacHex = h.toString("hex");
   const n64 = u64From(h.subarray(0, 8));
   const r = Number((n64 >> 11n)) / Math.pow(2, 53);
   const edge = 0.99;
   const m = Math.max(1.01, edge / (1 - Math.min(0.999999999999, r)));
-  return Math.min(m, 10000);
+  const crashAtMul = Math.min(m, 10000);
+  return { crashAtMul, hmacHex, n64: n64.toString(), r };
 }
+
+/**
+ * multiplierAt(startMs)
+ */
 function multiplierAt(startMs) {
   const speed = Number(process.env.CRASH_SPEED_MS || 3500);
   const elapsed = Math.max(0, Date.now() - startMs);
@@ -427,33 +445,50 @@ function multiplierAt(startMs) {
 }
 function toBps(m) { return Math.floor(m * 10000); }
 
-// rounds in memory
+// ----- in-memory rounds ------------------------------------------------------
+/*
+  rounds: Map<nonce, {
+    playerPk: PublicKey,
+    betLamports: BigInt,
+    clientSeed: string,
+    serverSeed: Buffer,
+    serverSeedHex: string,
+    serverSeedHash: string,
+    startTs: number,
+    crashAtMul: number,
+    crashed: boolean,
+    cashed: boolean,
+    timer: Timeout,
+    hmacHex: string
+  }>
+*/
 const rounds = new Map();
 
-// ----- free-form signed messages ---------------------------------------------
+// ----- message builders for ed25519-signed free-form messages ----------------
 function buildLockMessage({ programId, vault, player, betAmount, nonce, expiryUnix }) {
   const parts = [
     Buffer.from("CRASH_LOCK_V1"),
     programId.toBuffer(),
     vault.toBuffer(),
     player.toBuffer(),
-    (()=>{const b=Buffer.alloc(8); b.writeBigUInt64LE(BigInt(betAmount)); return b;})(),
-    (()=>{const b=Buffer.alloc(8); b.writeBigUInt64LE(BigInt(nonce)); return b;})(),
-    (()=>{const b=Buffer.alloc(8); b.writeBigInt64LE(BigInt(expiryUnix)); return b;})(),
+    (() => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(betAmount)); return b; })(),
+    (() => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(nonce)); return b; })(),
+    (() => { const b = Buffer.alloc(8); b.writeBigInt64LE(BigInt(expiryUnix)); return b; })(),
   ];
   return Buffer.concat(parts);
 }
+
 function buildResolveMessage({ programId, vault, player, betAmount, multiplierBps, payout, nonce, expiryUnix }) {
   const parts = [
     Buffer.from("CRASH_RESOLVE_V1"),
     programId.toBuffer(),
     vault.toBuffer(),
     player.toBuffer(),
-    (()=>{const b=Buffer.alloc(8); b.writeBigUInt64LE(BigInt(betAmount)); return b;})(),
-    (()=>{const b=Buffer.alloc(4); b.writeUInt32LE(multiplierBps>>>0); return b;})(),
-    (()=>{const b=Buffer.alloc(8); b.writeBigUInt64LE(BigInt(payout)); return b;})(),
-    (()=>{const b=Buffer.alloc(8); b.writeBigUInt64LE(BigInt(nonce)); return b;})(),
-    (()=>{const b=Buffer.alloc(8); b.writeBigInt64LE(BigInt(expiryUnix)); return b;})(),
+    (() => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(betAmount)); return b; })(),
+    (() => { const b = Buffer.alloc(4); b.writeUInt32LE(multiplierBps >>> 0); return b; })(),
+    (() => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(payout)); return b; })(),
+    (() => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(nonce)); return b; })(),
+    (() => { const b = Buffer.alloc(8); b.writeBigInt64LE(BigInt(expiryUnix)); return b; })(),
   ];
   return Buffer.concat(parts);
 }
@@ -473,8 +508,9 @@ async function sendResolveTx({ ctx, nonce, cashoutMultiplier }) {
   if (win) {
     const m = Math.max(1, Number(cashoutMultiplier));
     multBps = toBps(m);
+    // gross = bet * multBps / 10000, net profit paid back to user vault = gross - bet
     const gross = (ctx.betLamports * BigInt(multBps)) / 10000n;
-    const net   = gross - ctx.betLamports; // pay only profit back to user_vault
+    const net   = gross - ctx.betLamports;
     payout = Number(net > 0n ? net : 0n);
   }
 
@@ -526,12 +562,12 @@ async function sendResolveTx({ ctx, nonce, cashoutMultiplier }) {
   return { txSig, multBps, payout };
 }
 
-// ----- WS attach (Dice-style, no Phantom on Play) ----------------------------
+// ----- WebSocket attach for Crash game ---------------------------------------
 function attachCrash(io) {
   io.on("connection", (socket) => {
     socket.on("register", ({ player }) => { socket.data.player = String(player || "guest"); });
 
-    // Play → server builds & sends lock
+    // Prepare lock: server builds lock tx and starts an in-memory round with serverSeed
     socket.on("crash:prepare_lock", async ({ player, betAmountLamports, clientSeed }) => {
       try {
         if (!player) return socket.emit("crash:error", { code: "NO_PLAYER", message: "player required" });
@@ -556,7 +592,7 @@ function attachCrash(io) {
         const expiryUnix = Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
         const pendingPda = derivePendingCrashPda(playerPk, nonce);
 
-        // presence of admin ed25519 before crash_lock
+        // Build signed ed25519 presence for server before crash_lock
         const lockMsg = buildLockMessage({
           programId: PROGRAM_ID,
           vault: houseVault,
@@ -571,21 +607,15 @@ function attachCrash(io) {
         const edIndex = 1; // [cuLimit, edIx, crash_lock]
         const payer   = await getServerKeypair();
         const cuLimit = ComputeBudgetProgram.setComputeUnitLimit({ units: 220_000 });
-await precheckOrThrow({
-  userWallet: player,
-  stakeLamports: String(betLamports),
-  gameKey: "crash",
-});
 
-        // before building lock/tx:
-await precheckOrThrow({
-  userWallet: player,                 // base58
-  stakeLamports: betLamports,         // BigInt or Number
-  gameKey: "crash",                    // "crash","plinko","mines","memeslot","coinflip_pvp"
-  // autoCashoutX: 1.1                 // e.g. for crash guard hint, optional
-});
-        
-        // Server pays — no Phantom popup
+        // Pre-checks (balance, bonus rules, etc.)
+        await precheckOrThrow({
+          userWallet: player,
+          stakeLamports: betLamports,
+          gameKey: "crash",
+        });
+
+        // Build and send crash_lock tx (server pays)
         const ixLock  = ixCrashLock({
           programId: PROGRAM_ID,
           player: playerPk,
@@ -612,85 +642,117 @@ await precheckOrThrow({
         const txSig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
         await connection.confirmTransaction(txSig, "confirmed");
 
-        // start round + ticks
+        // Start in-memory round and compute crash point (serverSeed revealed only after resolve)
         const serverSeed = crypto.randomBytes(32);
+        const serverSeedHex = serverSeed.toString("hex");
+        const serverSeedHash = crypto.createHash("sha256").update(serverSeed).digest("hex");
+
         rounds.set(nonce, {
           playerPk,
           betLamports,
           clientSeed: String(clientSeed || ""),
-          serverSeed,
+          serverSeed,          // Buffer
+          serverSeedHex,       // string for reveal
+          serverSeedHash,      // string commitment
           startTs: Date.now(),
           crashAtMul: 0,
           crashed: false,
           cashed: false,
           timer: null,
+          hmacHex: null,
         });
         const ctx = rounds.get(nonce);
-        ctx.crashAtMul = deriveCrashPoint({
+
+        // derive crash point and keep hmacHex for later reveal
+        const det = deriveCrashPointDetailed({
           serverSeed: ctx.serverSeed,
           clientSeed: ctx.clientSeed,
           nonce: Number(nonce),
         });
+        ctx.crashAtMul = det.crashAtMul;
+        ctx.hmacHex = det.hmacHex;
 
-        const serverSeedHash = crypto.createHash("sha256").update(serverSeed).digest("hex");
+        // Emit lock + commitment
         socket.emit("crash:locked", { nonce: String(nonce), txSig, serverSeedHash });
 
+        // Start tick updates
         const tickMs = 75;
         ctx.timer = setInterval(() => {
-          if (ctx.cashed || ctx.crashed) return;
-          const m = multiplierAt(ctx.startTs);
-          if (m >= ctx.crashAtMul) {
-            ctx.crashed = true;
-            clearInterval(ctx.timer);
-            socket.emit("crash:crashed", { nonce: String(nonce), finalMultiplier: ctx.crashAtMul });
+          try {
+            if (ctx.cashed || ctx.crashed) return;
+            const m = multiplierAt(ctx.startTs);
+            // emit tick to everyone (or you can emit to socket only if desired)
+            io.emit("crash:tick", { nonce: String(nonce), multiplier: m });
 
-            sendResolveTx({ ctx, nonce: Number(nonce), cashoutMultiplier: null })
-              .then(async ({ txSig: rSig, multBps, payout }) => {
-                try {
-                  await DB.recordGameRound?.({
-                    game_key: "crash",
-                    player: ctx.playerPk.toBase58(),
-                    nonce: Number(nonce),
-                    stake_lamports: Number(ctx.betLamports),
-                    payout_lamports: 0,
-                    result_json: { crashedAt: ctx.crashAtMul, cashout: null },
-                  });
-                } catch {}
-                socket.emit("crash:resolved", {
-                  nonce: String(nonce),
-                  multiplierBps: multBps,
-                  payoutLamports: String(payout),
-                  txSig: rSig,
+            if (m >= ctx.crashAtMul) {
+              // Crash occurred
+              ctx.crashed = true;
+              clearInterval(ctx.timer);
+              // notify immediate player and everyone
+              socket.emit("crash:crashed", { nonce: String(nonce), finalMultiplier: ctx.crashAtMul });
+              io.emit("crash:crashed", { nonce: String(nonce), finalMultiplier: ctx.crashAtMul });
+
+              // Resolve loss (no cashout)
+              sendResolveTx({ ctx, nonce: Number(nonce), cashoutMultiplier: null })
+                .then(async ({ txSig: rSig, multBps, payout }) => {
+                  try {
+                    await DB.recordGameRound?.({
+                      game_key: "crash",
+                      player: ctx.playerPk.toBase58(),
+                      nonce: Number(nonce),
+                      stake_lamports: Number(ctx.betLamports),
+                      payout_lamports: 0,
+                      result_json: { crashedAt: ctx.crashAtMul, cashout: null },
+                    });
+                  } catch (err) { /* ignore DB failure */ }
+
+                  // Notify player & all clients of resolved TX + reveal full provable info
+                  const revealPayload = {
+                    nonce: String(nonce),
+                    serverSeedHex: ctx.serverSeedHex,
+                    clientSeed: ctx.clientSeed,
+                    formula: "HMAC_SHA256(serverSeed, clientSeed + nonce) -> first 8 bytes -> u64 >> 11 / 2^53 -> multiplier",
+                    hmacHex: ctx.hmacHex,
+                    crashAtMul: ctx.crashAtMul,
+                    txSig: rSig,
+                    payoutLamports: String(payout),
+                    multiplierBps: multBps,
+                  };
+
+                  socket.emit("crash:resolved", revealPayload);
+                  io.emit("crash:resolved", revealPayload);
+                  socket.emit("crash:reveal_seed", revealPayload);
+                  io.emit("crash:reveal_seed", revealPayload);
+
+                  // cleanup
+                  rounds.delete(Number(nonce));
+                })
+                .catch((e) => {
+                  console.error("resolve(loss) send error:", e);
+                  socket.emit("crash:error", { code: "RESOLVE_FAIL", message: String(e.message || e) });
                 });
-                socket.emit("crash:reveal_seed", {
-                  nonce: String(nonce),
-                  serverSeedHex: Buffer.from(ctx.serverSeed).toString("hex"),
-                });
-              })
-              .catch((e) => {
-                console.error("resolve(loss) send error:", e);
-                socket.emit("crash:error", { code: "RESOLVE_FAIL", message: String(e.message || e) });
-              });
-            return;
+            }
+          } catch (tickErr) {
+            console.error("tick error:", tickErr);
           }
-          socket.emit("crash:tick", { nonce: String(nonce), multiplier: m });
         }, tickMs);
+
       } catch (e) {
         console.error("crash:prepare_lock error:", e);
         socket.emit("crash:error", { code: "PREPARE_FAIL", message: String(e.message || e) });
       }
     });
 
-    // Cashout → server resolve (win)
+    // Cashout (player wins) → server resolves and sends on-chain resolve to pay profit
     socket.on("crash:cashout", async ({ player, nonce, atMultiplier }) => {
       try {
         const ctx = rounds.get(Number(nonce));
         if (!ctx) return socket.emit("crash:error", { code: "NOT_FOUND", message: "no round" });
-        if (ctx.crashed || ctx.cashed) return;
+        if (ctx.crashed || ctx.cashed) return socket.emit("crash:error", { code: "ALREADY_RESOLVED", message: "round already finished" });
 
         const liveM = multiplierAt(ctx.startTs);
         const m = Math.max(1, Number(atMultiplier || liveM));
-        if (m <= 1) return;
+        if (m <= 1) return socket.emit("crash:error", { code: "BAD_MULTIPLIER", message: "invalid cashout multiplier" });
 
         ctx.cashed = true;
         if (ctx.timer) clearInterval(ctx.timer);
@@ -713,14 +775,33 @@ await precheckOrThrow({
               amount: (Number(payout) / 1e9).toFixed(4),
             });
           }
-        } catch {}
+        } catch (err) { /* ignore DB failures */ }
 
-        io.emit("crash:resolved", {
+        // Build reveal/resolved payload (full provable info + tx)
+        const revealPayload = {
           nonce: String(nonce),
-          multiplierBps: multBps,
-          payoutLamports: String(payout),
+          serverSeedHex: ctx.serverSeedHex,
+          clientSeed: ctx.clientSeed,
+          formula: "HMAC_SHA256(serverSeed, clientSeed + nonce) -> first 8 bytes -> u64 >> 11 / 2^53 -> multiplier",
+          hmacHex: ctx.hmacHex,
+          crashAtMul: ctx.crashAtMul,
           txSig,
-        });
+          payoutLamports: String(payout),
+          multiplierBps: multBps,
+          cashoutMultiplier: m
+        };
+
+        // Notify player & all clients
+        socket.emit("crash:resolved", revealPayload);
+        io.emit("crash:resolved", revealPayload);
+
+        // Reveal seed and HMAC for provable fairness
+        socket.emit("crash:reveal_seed", revealPayload);
+        io.emit("crash:reveal_seed", revealPayload);
+
+        // cleanup
+        rounds.delete(Number(nonce));
+
       } catch (e) {
         console.error("crash:cashout error:", e);
         socket.emit("crash:error", { code: "CASHOUT_FAIL", message: String(e.message || e) });
@@ -730,5 +811,7 @@ await precheckOrThrow({
 }
 
 module.exports = { attachCrash };
+
+
 
 

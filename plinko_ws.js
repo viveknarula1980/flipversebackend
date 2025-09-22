@@ -411,6 +411,7 @@
 // backend/plinko_ws.js — STRICT resolver + DB gating/persistence (table-driven payouts)
 
 // backend/plinko.js
+// backend/plinko_ws.js
 const crypto = require("crypto");
 const {
   PublicKey,
@@ -441,11 +442,7 @@ const {
 } = require("./signer");
 
 const DB = global.db || require("./db");
-
 const { precheckOrThrow } = require("./bonus_guard");
-
-
-
 
 // ---------- fixed payout tables (multipliers & probabilities) ----------
 const PLINKO_TABLE = {
@@ -516,8 +513,9 @@ const PLINKO_TABLE = {
     "16": [{"slot":0,"multiplier":0.0,"probability":1.5e-05},{"slot":1,"multiplier":0.2522,"probability":0.000244},{"slot":2,"multiplier":0.4645,"probability":0.001831},{"slot":3,"multiplier":0.6384,"probability":0.008545},{"slot":4,"multiplier":0.775,"probability":0.027771},{"slot":5,"multiplier":0.8761,"probability":0.06665},{"slot":6,"multiplier":0.9437,"probability":0.122192},{"slot":7,"multiplier":0.9804,"probability":0.174561},{"slot":8,"multiplier":0.9906,"probability":0.196381},{"slot":9,"multiplier":0.9804,"probability":0.174561},{"slot":10,"multiplier":0.9437,"probability":0.122192},{"slot":11,"multiplier":0.8761,"probability":0.06665},{"slot":12,"multiplier":0.775,"probability":0.027771},{"slot":13,"multiplier":0.6384,"probability":0.008545},{"slot":14,"multiplier":0.4645,"probability":0.001831},{"slot":15,"multiplier":0.2522,"probability":0.000244},{"slot":16,"multiplier":0.0,"probability":1.5e-05}]
   }
 };
+// === paste your PLINKO_TABLE content from original file above ===
+// For brevity in this snippet I assume PLINKO_TABLE is identical to the one you provided.
 
-// ---------- helpers ----------
 const DIFF_KEYS = ["easy", "med", "hard", "harder", "insane", "extreme"];
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const i32   = (x) => (Number.isFinite(Number(x)) ? Math.floor(Number(x)) : 0);
@@ -536,8 +534,50 @@ function getTable(rows, diffIdx) {
   };
 }
 
-function chooseIndex(probs) {
-  const r = Math.random();
+// ---------- Provably-fair RNG (HMAC-SHA256 stream) ----------
+function sha256Hex(buf) {
+  return crypto.createHash("sha256").update(buf).digest("hex");
+}
+function makeRng({ serverSeed, clientSeed, nonce }) {
+  let counter = 0;
+  let pool = Buffer.alloc(0);
+  function refill() {
+    const h = crypto
+      .createHmac("sha256", serverSeed)
+      .update(String(clientSeed || ""))
+      .update(Buffer.from(String(nonce)))
+      .update(Buffer.from([
+        counter & 0xff,
+        (counter >> 8) & 0xff,
+        (counter >> 16) & 0xff,
+        (counter >> 24) & 0xff,
+      ]))
+      .digest();
+    counter++;
+    pool = Buffer.concat([pool, h]);
+  }
+  function nextU32() {
+    if (pool.length < 4) refill();
+    const x = pool.readUInt32BE(0);
+    pool = pool.slice(4);
+    return x >>> 0;
+  }
+  function nextFloat() {
+    return nextU32() / 2 ** 32;
+  }
+  function nextInt(min, max) {
+    const span = max - min + 1;
+    return min + Math.floor(nextFloat() * span);
+  }
+  function pick(arr) {
+    return arr[nextInt(0, arr.length - 1)];
+  }
+  return { nextU32, nextFloat, nextInt, pick };
+}
+
+// choose index by probabilities using rng.nextFloat
+function chooseIndexWithRng(rng, probs) {
+  const r = rng.nextFloat();
   let acc = 0;
   for (let i = 0; i < probs.length; i++) {
     acc += probs[i];
@@ -552,12 +592,13 @@ const i64le = (n) => { const b = Buffer.alloc(8); b.writeBigInt64LE(BigInt(n)); 
 
 // ---------- WS ----------
 function attachPlinko(io) {
-  console.log("Plinko WS (server-signed lock/resolve via Smart Vault)");
+  console.log("Plinko WS (server-signed lock/resolve + provably-fair reveal)");
 
   io.on("connection", (socket) => {
     socket.on("register", ({ player }) => { socket.data.player = String(player || "guest"); });
 
     // Step 1: client asks to place a plinko round (NO wallet signature required)
+    // Added provably-fair serverSeed & serverSeedHash similar to slots:place
     socket.on("plinko:prepare_lock", async (p) => {
       try {
         const player = String(p?.player || "");
@@ -575,6 +616,7 @@ function attachPlinko(io) {
         const balls = clamp(i32(p.balls), 1, 100);
         const rows  = clamp(i32(p.rows),  8, 16);
         const diff  = clamp(i32(p.diff ?? p.riskIndex), 0, 5);
+        const clientSeed = String(p.clientSeed || "");
 
         if (!(unitLamports > 0n)) return socket.emit("plinko:error", { code: "BAD_BET", message: "unitLamports must be > 0" });
         if (unitLamports < min || unitLamports > max) {
@@ -597,6 +639,10 @@ function attachPlinko(io) {
         const expiryUnix = Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
         const pendingPlinko = derivePendingPlinkoPda(playerPk, nonce);
 
+        // Provably-fair: generate serverSeed and send serverSeedHash to client
+        const serverSeed = crypto.randomBytes(32);
+        const serverSeedHash = sha256Hex(serverSeed);
+
         // Ed25519 presence (program only checks presence, but we still sign something sensible)
         const msgBuf = Buffer.concat([
           Buffer.from("PLINKO_LOCK"),
@@ -617,12 +663,13 @@ function attachPlinko(io) {
         const feePayer = await getServerKeypair();
         const cuPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
         const cuLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 350_000 });
-// Welcome bonus guard check
-await precheckOrThrow({
-  userWallet: player,                 // base58 string
-  stakeLamports: String(total),       // total = unitLamports * balls
-  gameKey: "plinko",
-});
+
+        // Welcome bonus guard check
+        await precheckOrThrow({
+          userWallet: player,                 // base58 string
+          stakeLamports: String(total),       // total = unitLamports * balls
+          gameKey: "plinko",
+        });
 
         const lockIx = ixPlinkoLock({
           programId: PROGRAM_ID,
@@ -661,7 +708,9 @@ await precheckOrThrow({
         // persist a round context in memory (and DB if you like)
         rounds.set(nonce, {
           playerPk,
-          unitLamports: BigInt(unitLamports),
+          player: player,
+          betUnitLamports: BigInt(unitLamports),
+          unitLamports, // original
           balls,
           rows,
           diff,
@@ -670,7 +719,34 @@ await precheckOrThrow({
           results: [],
           pending: pendingPlinko.toBase58(),
           expiryUnix,
+          serverSeed,
+          serverSeedHash,
+          clientSeed,
         });
+
+        // optional DB persist for serverSeed + serverSeedHash so reveal survives restart
+        try {
+          if (typeof DB.pool?.query === "function") {
+            await DB.pool.query(
+              `insert into plinko_rounds(player, nonce, unit_lamports, balls, rows, diff, server_seed_hash, server_seed, client_seed, status, lock_sig)
+               values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'locked',$10)`,
+              [
+                player,
+                BigInt(nonce),
+                Number(unitLamports),
+                balls,
+                rows,
+                diff,
+                serverSeedHash,
+                serverSeed.toString("hex"),
+                clientSeed,
+                sig,
+              ]
+            );
+          }
+        } catch (e) {
+          console.warn("plinko: DB insert warn:", e?.message || e);
+        }
 
         // Tell UI to start physics immediately (no wallet popup step)
         socket.emit("plinko:locked", {
@@ -679,6 +755,7 @@ await precheckOrThrow({
           multipliers,
           probabilities,
           txSig: sig,
+          serverSeedHash, // provably-fair: publish hash now
         });
       } catch (e) {
         console.error("plinko:prepare_lock error:", e);
@@ -687,17 +764,52 @@ await precheckOrThrow({
       }
     });
 
-    // Drive ticks + resolve (server computes, then calls on-chain resolve with server fee payer)
+    // Drive ticks + resolve (server computes using serverSeed & clientSeed, then calls on-chain resolve)
     socket.on("plinko:start_run", async ({ nonce }) => {
       try {
-        const ctx = rounds.get(Number(nonce));
+        let ctx = rounds.get(Number(nonce));
+        // restore from DB if missing (server restart)
+        if (!ctx && typeof DB.pool?.query === "function") {
+          try {
+            const r = await DB.pool.query(
+              `select * from plinko_rounds where nonce=$1 limit 1`,
+              [BigInt(nonce)]
+            );
+            const row = r.rows[0] || null;
+            if (row) {
+              ctx = {
+                player: row.player,
+                playerPk: new PublicKey(row.player),
+                betUnitLamports: BigInt(row.unit_lamports || 0),
+                unitLamports: BigInt(row.unit_lamports || 0),
+                balls: Number(row.balls || 0),
+                rows: Number(row.rows || 0),
+                diff: Number(row.diff || 0),
+                probabilities: getTable(Number(row.rows || 8), Number(row.diff || 0)).probabilities,
+                multipliers: getTable(Number(row.rows || 8), Number(row.diff || 0)).multipliers,
+                results: [],
+                pending: row.pending || null,
+                expiryUnix: Number(row.expiry_unix || 0),
+                serverSeed: row.server_seed ? Buffer.from(row.server_seed, "hex") : null,
+                serverSeedHash: row.server_seed_hash,
+                clientSeed: row.client_seed || "",
+              };
+            }
+          } catch (e) {
+            console.warn("plinko: DB restore warn:", e?.message || e);
+          }
+        }
+
         if (!ctx) return socket.emit("plinko:error", { code: "NOT_FOUND", message: "no round" });
 
-        // ticks
+        // ticks: use provably-fair RNG
+        const rng = makeRng({ serverSeed: ctx.serverSeed, clientSeed: ctx.clientSeed || "", nonce: Number(nonce) });
+
         for (let i = 0; i < ctx.balls; i++) {
-          const idx = chooseIndex(ctx.probabilities);
+          const idx = chooseIndexWithRng(rng, ctx.probabilities);
           ctx.results.push(idx);
           socket.emit("plinko:tick", { nonce: String(nonce), ballIndex: i, slotIndex: idx });
+          // small delay so client can animate; keep same 60ms you used before
           await new Promise((r) => setTimeout(r, 60));
         }
 
@@ -784,7 +896,15 @@ await precheckOrThrow({
               amount: (Number(net)/1e9).toFixed(4),
             });
           }
-        } catch {}
+          if (typeof DB.pool?.query === "function") {
+            await DB.pool.query(
+              `update plinko_rounds set results_json=$1, payout=$2, status='resolved', resolve_sig=$3 where nonce=$4 and player=$5`,
+              [JSON.stringify({ rows: ctx.rows, balls: ctx.balls, results: ctx.results }), Number(net), sig, BigInt(nonce), ctx.player]
+            );
+          }
+        } catch (err) {
+          console.warn("plinko: DB update warn:", err?.message || err);
+        }
 
         socket.emit("plinko:resolved", {
           nonce: String(nonce),
@@ -797,6 +917,34 @@ await precheckOrThrow({
           tx: sig,
         });
 
+        // ---- PROVABLY-FAIR: REVEAL seed AFTER resolve ----
+        try {
+          const serverSeedHex = ctx.serverSeed ? ctx.serverSeed.toString("hex") : null;
+          const recomputedHash = ctx.serverSeed ? sha256Hex(ctx.serverSeed) : null;
+
+          // firstHMAC (identical to makeRng refill first digest) to help quick verification on client
+          let firstHmacHex = null;
+          if (ctx.serverSeed) {
+            const firstHmac = crypto
+              .createHmac("sha256", ctx.serverSeed)
+              .update(String(ctx.clientSeed || ""))
+              .update(Buffer.from(String(nonce)))
+              .digest("hex");
+            firstHmacHex = firstHmac;
+          }
+
+          socket.emit("plinko:reveal_seed", {
+            nonce: String(nonce),
+            serverSeedHex,
+            serverSeedHash: ctx.serverSeedHash || recomputedHash,
+            clientSeed: ctx.clientSeed || "",
+            formula: "HMAC_SHA256(serverSeed, clientSeed + nonce) -> RNG stream (makeRng) used to pick slots per ball",
+            firstHmacHex,
+          });
+        } catch (err) {
+          console.warn("plinko: reveal_seed emit failed:", err?.message || err);
+        }
+
         rounds.delete(Number(nonce));
       } catch (e) {
         console.error("plinko:start_run error:", e);
@@ -808,4 +956,3 @@ await precheckOrThrow({
 }
 
 module.exports = { attachPlinko };
-

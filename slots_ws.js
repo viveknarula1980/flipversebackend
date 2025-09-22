@@ -406,6 +406,7 @@
 
 // backend/slots_ws.js — unified with Dice/Mines: single smart vault, one program id, server fee-payer
 
+// slots_ws.js (provably-fair reveal added)
 const crypto = require("crypto");
 const {
   PublicKey,
@@ -428,7 +429,6 @@ const { ixSlotsLock, ixSlotsResolve } = require("./solana_anchor_ix");
 const { ADMIN_PK, getServerKeypair } = require("./signer");
 const DB = global.db || require("./db");
 const { precheckOrThrow } = require("./bonus_guard");
-
 
 const SYSVAR_INSTRUCTIONS_PUBKEY = new PublicKey("Sysvar1nstructions1111111111111111111111111");
 
@@ -612,13 +612,13 @@ function attachSlots(io) {
             code: "BET_RANGE",
             message: "Bet outside allowed range",
           });
-          // Bonus guard check (welcome bonus, max bet, WR, etc.)
-await precheckOrThrow({
-  userWallet: player,                  // base58 pubkey
-  stakeLamports: betLamports.toString(), // string, not BigInt
-  gameKey: "slots",
-});
 
+        // Bonus guard check (welcome bonus, max bet, WR, etc.)
+        await precheckOrThrow({
+          userWallet: player,                  // base58 pubkey
+          stakeLamports: betLamports.toString(), // string, not BigInt
+          gameKey: "slots",
+        });
 
         const playerPk = new PublicKey(player);
         const userVault = deriveUserVaultPda(playerPk);
@@ -643,7 +643,6 @@ await precheckOrThrow({
         const cuPrice = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
         const cuLimit = ComputeBudgetProgram.setComputeUnitLimit({ units: 350_000 });
 
-        
         const lockIx = ixSlotsLock({
           programId: PROGRAM_ID,
           player: playerPk,
@@ -726,6 +725,7 @@ await precheckOrThrow({
      * SLOTS RESOLVE
      * in:  { player, nonce }
      * out: "slots:resolved" { nonce, outcome, grid, payoutLamports, feePct, txSig }
+     * After resolved, server also emits "slots:reveal_seed" with serverSeedHex + verify metadata.
      */
     socket.on("slots:resolve", async ({ player, nonce }) => {
       try {
@@ -791,7 +791,7 @@ await precheckOrThrow({
         const { ADMIN_PK: ADMIN_PK_LOCAL, signMessageEd25519 } = require("./signer");
         const edSig = await signMessageEd25519(resolveMsg);
         const edIx = buildEd25519VerifyIx({
-          message: resolveMsg,
+          message: edSig ? resolveMsg : resolveMsg, // keep consistent
           signature: edSig,
           publicKey: ADMIN_PK_LOCAL,
         });
@@ -863,6 +863,7 @@ await precheckOrThrow({
           console.warn("slots: DB update warn:", e?.message || e);
         }
 
+        // Emit resolved result
         socket.emit("slots:resolved", {
           nonce: String(nonce),
           outcome: outcome.key,
@@ -872,6 +873,36 @@ await precheckOrThrow({
           txSig,
         });
 
+        // ---- PROVABLY-FAIR: REVEAL seed AFTER resolve ----
+        try {
+          // If we have serverSeed in context (either in-memory or restored from DB), reveal it.
+          const serverSeedHex = ctx.serverSeed ? ctx.serverSeed.toString("hex") : null;
+          const recomputedHash = ctx.serverSeed ? sha256Hex(ctx.serverSeed) : null;
+          // first HMAC for quick verification (same as makeRng first refill)
+          let firstHmacHex = null;
+          if (ctx.serverSeed) {
+            const firstHmac = crypto
+              .createHmac("sha256", ctx.serverSeed)
+              .update(String(ctx.clientSeed || ""))
+              .update(Buffer.from(String(nonce)))
+              .digest("hex");
+            firstHmacHex = firstHmac;
+          }
+
+          socket.emit("slots:reveal_seed", {
+            nonce: String(nonce),
+            serverSeedHex,
+            serverSeedHash: ctx.serverSeedHash || recomputedHash,
+            clientSeed: ctx.clientSeed || "",
+            formula: "HMAC_SHA256(serverSeed, clientSeed + nonce) -> RNG stream (makeRng) used to produce reels",
+            firstHmacHex, // helpful for quick HMAC check
+          });
+        } catch (err) {
+          // don't fail the whole flow if reveal emit fails; log and continue
+          console.warn("slots: reveal_seed emit failed:", err?.message || err);
+        }
+
+        // cleanup pending
         slotsPending.delete(Number(nonce));
       } catch (e) {
         console.error("slots:resolve error:", e);
@@ -881,11 +912,9 @@ await precheckOrThrow({
 
     // ---- Legacy shims (optional) ----
     socket.on("slots:prepare_lock", async (payload) => {
-      // run place and translate response event name to "slots:lock_tx" for older frontends
       const originalEmit = socket.emit.bind(socket);
       socket.emit = (ev, data) => {
         if (ev === "slots:locked") {
-          // rename and forward
           originalEmit("slots:lock_tx", data);
           return;
         }
@@ -899,7 +928,6 @@ await precheckOrThrow({
     });
 
     socket.on("slots:prepare_resolve", async (payload) => {
-      // direct map to slots:resolve
       await new Promise((res) => {
         const done = () => res();
         socket.once("slots:resolved", done);
@@ -910,4 +938,5 @@ await precheckOrThrow({
 }
 
 module.exports = { attachSlots };
+
 

@@ -549,6 +549,9 @@
 // 2-player Coinflip using the SAME Anchor program as Dice/Mines.
 // Server fee-payer sends both lock & resolve. Payout = (A+B - fee). Loser payout = 0.
 
+// coinflip.js
+// Provably-fair coinflip server module — creates serverSeed at lock, returns serverSeedHash, reveals seed after resolve.
+
 const crypto = require("crypto");
 const {
   PublicKey,
@@ -581,10 +584,15 @@ const {
 const DB = global.db || require("./db");
 const { precheckOrThrow } = require("./bonus_guard");
 
-
 // ---------- helpers ----------
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+function sha256Hex(buf) {
+  return crypto.createHash("sha256").update(buf).digest("hex");
+}
+
 function deriveOutcome({ serverSeed, clientSeedA, clientSeedB, nonce }) {
+  // same formula as in Slots: HMAC_SHA256(serverSeed, clientA + '|' + clientB + '|' + nonce)
   const h = crypto
     .createHmac("sha256", serverSeed)
     .update(String(clientSeedA || ""))
@@ -608,7 +616,7 @@ async function serverLock({ playerPk, side, stakeLamports, nonce, expiryUnix }) 
   const edSig = await signMessageEd25519(msg);
   const edIx  = buildEd25519VerifyIx({ message: msg, signature: edSig, publicKey: ADMIN_PK });
 
-  // [cuPrice?, cuLimit, edIx, lock] → ed25519_instr_index = 2
+  // [cuLimit, edIx, lock] → ed25519_instr_index = 2 (keep consistent with your program)
   const cuLimit = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
   const edIndex = 2;
 
@@ -699,13 +707,17 @@ async function serverResolve({ playerPk, winnerSide, payoutLamports, nonce }) {
 // ---------------- Matchmaking & Rooms ----------------
 const QUEUE_TTL_MS = Number(process.env.COINFLIP_QUEUE_TTL_MS || 3000);
 const waiting = [];
-const rooms = new Map();
+const rooms = new Map(); // will store { A, B, entryLamports, pendingA, pendingB, sameSide, serverSeed, serverSeedHash }
 
 async function createRoom(io, A, B) {
   // A and B: { socketId?, playerPk (base58), side:0/1, entryLamports, clientSeed, isBot? }
   const nonce = Date.now();
   const expiryUnix = Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
+
+  // Create serverSeed here (provably-fair). We'll emit serverSeedHash with locked events and reveal seed after resolve.
   const serverSeed = crypto.randomBytes(32);
+  const serverSeedHash = sha256Hex(serverSeed);
+  const serverSeedHex = serverSeed.toString("hex");
 
   const entryLamports = BigInt(A.entryLamports);
   const A_pk = new PublicKey(A.playerPk);
@@ -718,7 +730,9 @@ async function createRoom(io, A, B) {
     pendingA: null,
     pendingB: null,
     sameSide: Number(A.side) === Number(B.side),
-    serverSeed,
+    serverSeed,          // Buffer
+    serverSeedHash,
+    serverSeedHex,
   });
 
   // Inform both clients they’re matched
@@ -742,8 +756,31 @@ async function createRoom(io, A, B) {
   rooms.get(nonce).pendingA = lockA.pending;
   rooms.get(nonce).pendingB = lockB.pending;
 
-  if (A.socketId) io.to(A.socketId).emit("coinflip:locked", { nonce: String(nonce), txSig: lockA.txSig, role: "A" });
-  if (B.socketId) io.to(B.socketId).emit("coinflip:locked", { nonce: String(nonce), txSig: lockB.txSig, role: "B" });
+  // Emit locked AND include serverSeedHash so client can verify later
+  if (A.socketId) io.to(A.socketId).emit("coinflip:locked", { nonce: String(nonce), txSig: lockA.txSig, role: "A", serverSeedHash });
+  if (B.socketId) io.to(B.socketId).emit("coinflip:locked", { nonce: String(nonce), txSig: lockB.txSig, role: "B", serverSeedHash });
+
+  // Persist pending match to DB (best-effort, don't fail flow on DB error)
+  try {
+    if (typeof DB.pool?.query === "function") {
+      await DB.pool.query(
+        `insert into coinflip_matches(nonce, player_a, player_b, side_a, side_b, bet_lamports, status, server_seed_hash, server_seed)
+         values($1,$2,$3,$4,$5,$6,'locked',$7,$8)`,
+        [
+          BigInt(nonce),
+          rooms.get(nonce).A.playerPk.toBase58(),
+          rooms.get(nonce).B.playerPk.toBase58(),
+          rooms.get(nonce).A.side,
+          rooms.get(nonce).B.side,
+          Number(entryLamports),
+          serverSeedHash,
+          serverSeedHex,
+        ]
+      );
+    }
+  } catch (e) {
+    console.warn("[coinflip] DB insert locked warn:", e?.message || e);
+  }
 
   // Compute outcome (0=heads,1=tails) and tell both to start animation
   const outcome = deriveOutcome({
@@ -789,7 +826,7 @@ async function createRoom(io, A, B) {
     nonce,
   });
 
-  // Persist
+  // Persist final result
   try {
     await DB.recordCoinflipMatch?.({
       nonce: Number(nonce),
@@ -802,12 +839,30 @@ async function createRoom(io, A, B) {
       winner: (winnerKey === "A" ? rooms.get(nonce).A.playerPk : rooms.get(nonce).B.playerPk).toBase58(),
       payout_lamports: Number(payout),
       fee_bps: feeBps,
+      resolve_sig_winner: sigWin,
+      resolve_sig_loser: sigLos,
     });
+
     await DB.recordActivity?.({
       user: (winnerKey === "A" ? rooms.get(nonce).A.playerPk : rooms.get(nonce).B.playerPk).toBase58(),
       action: "Coinflip win",
       amount: (Number(payout) / 1e9).toFixed(4),
     });
+
+    if (typeof DB.pool?.query === "function") {
+      await DB.pool.query(
+        `update coinflip_matches set outcome=$1, winner=$2, payout_lamports=$3, fee_bps=$4, status='resolved', resolve_sig_winner=$5, resolve_sig_loser=$6 where nonce=$7`,
+        [
+          Number(outcome),
+          (winnerKey === "A" ? rooms.get(nonce).A.playerPk.toBase58() : rooms.get(nonce).B.playerPk.toBase58()),
+          Number(payout),
+          feeBps,
+          sigWin,
+          sigLos,
+          BigInt(nonce),
+        ]
+      );
+    }
   } catch (e) {
     console.warn("[coinflip] DB save warn:", e?.message || e);
   }
@@ -823,6 +878,38 @@ async function createRoom(io, A, B) {
   };
   if (rooms.get(nonce).A.socketId) io.to(rooms.get(nonce).A.socketId).emit("coinflip:resolved", resultPayload);
   if (rooms.get(nonce).B.socketId) io.to(rooms.get(nonce).B.socketId).emit("coinflip:resolved", resultPayload);
+
+  // ---- PROVABLY-FAIR: REVEAL server seed AFTER resolve ----
+  try {
+    const r = rooms.get(nonce);
+    const serverSeedHexReveal = r.serverSeedHex || (r.serverSeed ? r.serverSeed.toString("hex") : null);
+    const recomputedHash = r.serverSeed ? sha256Hex(r.serverSeed) : null;
+
+    const firstHmacHex = r.serverSeed
+      ? crypto.createHmac("sha256", r.serverSeed)
+          .update(String(r.A.clientSeed || ""))
+          .update("|")
+          .update(String(r.B.clientSeed || ""))
+          .update("|")
+          .update(Buffer.from(String(nonce)))
+          .digest("hex")
+      : null;
+
+    const revealPayload = {
+      nonce: String(nonce),
+      serverSeedHex: serverSeedHexReveal,
+      serverSeedHash: r.serverSeedHash || recomputedHash,
+      clientSeedA: r.A.clientSeed || "",
+      clientSeedB: r.B.clientSeed || "",
+      formula: "HMAC_SHA256(serverSeed, clientSeedA + '|' + clientSeedB + '|' + nonce) -> first byte & 1 = outcome",
+      firstHmacHex,
+    };
+
+    if (r.A.socketId) io.to(r.A.socketId).emit("coinflip:reveal_seed", revealPayload);
+    if (r.B.socketId) io.to(r.B.socketId).emit("coinflip:reveal_seed", revealPayload);
+  } catch (err) {
+    console.warn("[coinflip] reveal_seed emit failed:", err?.message || err);
+  }
 
   rooms.delete(nonce);
 }
@@ -855,12 +942,13 @@ function attachCoinflip(io) {
         const stake = BigInt(entryLamports || 0);
         if (!(stake > 0n)) return socket.emit("coinflip:error", { code: "BAD_BET", message: "entryLamports must be > 0" });
         if (stake < min || stake > max) return socket.emit("coinflip:error", { code: "BET_RANGE", message: "Bet outside allowed range" });
-      // 🔒 Bonus guard (welcome bonus, wagering rules, max-bet, etc.)
-await precheckOrThrow({
-  userWallet: player,                 // base58 pubkey
-  stakeLamports: stake.toString(),    // stringify the lamports
-  gameKey: "coinflip_pvp",            // keep unique key for this game
-});
+
+        // 🔒 Bonus guard (welcome bonus, wagering rules, max-bet, etc.)
+        await precheckOrThrow({
+          userWallet: player,                 // base58 pubkey
+          stakeLamports: stake.toString(),    // stringify the lamports
+          gameKey: "coinflip_pvp",            // keep unique key for this game
+        });
 
         const s = clamp(Number(side), 0, 1);
         const playerPk = new PublicKey(player);
