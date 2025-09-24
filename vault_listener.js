@@ -16,7 +16,7 @@ if (!process.env.PROGRAM_ID) throw new Error("PROGRAM_ID missing in .env");
 const PROGRAM_ID = new PublicKey(process.env.PROGRAM_ID);
 
 // Where your Express API is running (for /promo/welcome/credit-on-deposit)
-const API_BASE = process.env.API_BASE || "https://flipversebackend.onrender.com";
+const API_BASE = process.env.API_BASE || "https://api.zoggy.io";
 
 const SOL_PER_LAMPORT = 1e-9;
 

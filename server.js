@@ -90,7 +90,7 @@ function getClientIp(req) {
 }
 
 const SITE_URL =
-  process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://flipverse-web.vercel.app";
+  process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "https://api.zoggy.io";
 const PORT = Number(process.env.PORT || 4000);
 
 // ---------- Price helper (SOL→USDT) ----------
@@ -304,7 +304,7 @@ async function main() {
   app.set("trust proxy", true);
 
   // ---------- CORS ----------
-  const defaultAllowed = ["http://flipverse-web.vercel.app","http://51.20.249.35:3000","http://localhost:3000"];
+  const defaultAllowed = ["https://api.zoggy.io","http://51.20.249.35:3000","http://localhost:3000"];
   const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || defaultAllowed.join(","))
     .split(",")
     .map((s) => s.trim())
