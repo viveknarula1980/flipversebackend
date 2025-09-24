@@ -38,6 +38,8 @@ const PLINKO_PROGRAM_ID =
 const COINFLIP_PROGRAM_ID =
   process.env.COINFLIP_PROGRAM_ID || process.env.NEXT_PUBLIC_COINFLIP_PROGRAM_ID || null;
 
+const LAMPORTS_PER_SOL = 1e9;
+
 // ---------- DB ----------
 let db = require("./db");
 global.db = db;
@@ -96,14 +98,11 @@ const USD_PER_SOL_FALLBACK = Number(process.env.USD_PER_SOL || 200);
 let _priceCache = { t: 0, v: USD_PER_SOL_FALLBACK };
 async function getSolUsd() {
   try {
-    // cache for 30s to avoid hammering
     if (Date.now() - _priceCache.t < 30_000 && _priceCache.v > 0) return _priceCache.v;
 
     const [cbRes, binRes] = await Promise.allSettled([
       fetch("https://api.coinbase.com/v2/prices/SOL-USD/spot", { timeout: 4000 }),
-      fetch("https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT", {
-        timeout: 4000,
-      }),
+      fetch("https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT", { timeout: 4000 }),
     ]);
 
     const vals = [];
@@ -131,7 +130,6 @@ async function getSolUsd() {
 
 // ---------- PDA helpers (live balance) ----------
 function deriveUserVaultPda(playerPk) {
-  // must match the program's PDA seeds used in your on-chain program
   const [pda] = PublicKey.findProgramAddressSync(
     [Buffer.from("user_vault"), new PublicKey(playerPk).toBuffer()],
     PROGRAM_ID
@@ -144,15 +142,14 @@ async function fetchLivePdaLamports(wallet) {
     const pda = deriveUserVaultPda(wallet);
     const lamports = await connection.getBalance(pda, "confirmed");
     return lamports; // number
-  } catch (e) {
-    // swallow and let caller fall back to DB value
+  } catch {
     return null;
   }
 }
 
-// ---------- PDA balance updaters (DB) ----------
-async function setAbsolutePdaBalance(wallet, sol) {
-  const val = Number(sol) || 0;
+// ---------- PDA balance updaters (DB, **lamports** exact) ----------
+async function setAbsolutePdaBalanceLamports(wallet, lamports) {
+  const val = Math.max(0, Math.round(Number(lamports) || 0));
   await db.pool.query(
     `insert into app_users (user_id, username, pda_balance, last_active)
        values ($1, $1, $2, now())
@@ -161,8 +158,8 @@ async function setAbsolutePdaBalance(wallet, sol) {
     [String(wallet), val]
   );
 }
-async function adjustPdaBalance(wallet, deltaSol) {
-  const delta = Number(deltaSol) || 0;
+async function adjustPdaBalanceLamports(wallet, deltaLamports) {
+  const delta = Math.round(Number(deltaLamports) || 0);
   await db.pool.query(
     `insert into app_users (user_id, username, pda_balance, last_active)
        values ($1, $1, GREATEST(0, $2), now())
@@ -172,18 +169,142 @@ async function adjustPdaBalance(wallet, deltaSol) {
   );
 }
 
+// ---------- Welcome-Bonus Lock (unchanged core) ----------
+async function ensureWelcomeLockTable() {
+  await db.pool.query(`
+    create table if not exists welcome_lock_state (
+      wallet text primary key,
+      cash_exhausted boolean not null default false,
+      updated_at timestamptz not null default now()
+    );
+  `);
+}
+async function getCashExhausted(wallet) {
+  const { rows } = await db.pool.query(
+    `select cash_exhausted from welcome_lock_state where wallet=$1`,
+    [String(wallet)]
+  );
+  return Boolean(rows[0]?.cash_exhausted);
+}
+async function setCashExhausted(wallet, val) {
+  await db.pool.query(
+    `insert into welcome_lock_state (wallet, cash_exhausted)
+     values ($1, $2)
+     on conflict (wallet) do update set cash_exhausted=excluded.cash_exhausted, updated_at=now()`,
+    [String(wallet), !!val]
+  );
+}
+
+async function getWelcomeState(wallet) {
+  try {
+    const r = await fetch(
+      `http://127.0.0.1:${PORT}/promo/welcome/state?wallet=${encodeURIComponent(wallet)}`,
+      { timeout: 4000 }
+    );
+    if (!r.ok) return null;
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+async function parseLockedBaselineLamports(json) {
+  if (!json) return 0;
+  const N = (v) => (v == null || v === "" ? NaN : Number(v));
+
+  const directLamports = N(json.locked_remaining_lamports);
+  if (Number.isFinite(directLamports) && directLamports >= 0) {
+    return Math.round(directLamports);
+  }
+
+  const price = await getSolUsd();
+  const directUsd = N(json.locked_remaining_usd);
+  if (Number.isFinite(directUsd) && directUsd >= 0) {
+    return Math.max(0, Math.round((directUsd / (price || 1)) * LAMPORTS_PER_SOL));
+  }
+
+  const creditedUsd =
+    N(json.bonus_amount_usd) ??
+    N(json.credited_usd) ??
+    N(json.credited_amount_usd) ??
+    N(json.credited) ??
+    N(json.bonus_usd);
+
+  const wrProgress =
+    N(json.wr_progress) ?? N(json.wrPlayed) ?? N(json.wagered_usd) ?? N(json.wagered);
+  const wrTarget =
+    N(json.wr_target) ?? N(json.wr_required) ?? N(json.wrRequired) ?? N(json.wrTotal);
+
+  if (
+    Number.isFinite(creditedUsd) && creditedUsd >= 0 &&
+    Number.isFinite(wrProgress) && wrProgress >= 0 &&
+    Number.isFinite(wrTarget) && wrTarget > 0
+  ) {
+    const remainingUsd = creditedUsd * (1 - Math.max(0, Math.min(1, wrProgress / wrTarget)));
+    return Math.max(0, Math.round((remainingUsd / (price || 1)) * LAMPORTS_PER_SOL));
+  }
+  if (Number.isFinite(creditedUsd) && creditedUsd >= 0) {
+    return Math.max(0, Math.round((creditedUsd / (price || 1)) * LAMPORTS_PER_SOL));
+  }
+  return 0;
+}
+
+async function computeVaultLock(wallet) {
+  const pda = deriveUserVaultPda(wallet);
+  const pdaLamports = await connection.getBalance(pda, "confirmed");
+
+  const welcome = await getWelcomeState(wallet);
+  const baselineLockedLamports = await parseLockedBaselineLamports(welcome);
+
+  let cashExhausted = await getCashExhausted(wallet);
+  const EPS = 10_000; // ~0.00001 SOL
+
+  if (!cashExhausted) {
+    if (baselineLockedLamports > 0 && pdaLamports <= baselineLockedLamports + EPS) {
+      cashExhausted = true;
+      await setCashExhausted(wallet, true);
+    }
+  } else {
+    if (baselineLockedLamports <= EPS) {
+      cashExhausted = false;
+      await setCashExhausted(wallet, false);
+    }
+  }
+
+  const effectiveLockedLamports =
+    baselineLockedLamports > EPS
+      ? (cashExhausted ? pdaLamports : Math.min(pdaLamports, baselineLockedLamports))
+      : 0;
+
+  const withdrawableLamports = Math.max(0, pdaLamports - effectiveLockedLamports);
+
+  return {
+    wallet,
+    pdaLamports,
+    baselineLockedLamports,
+    cashExhausted,
+    effectiveLockedLamports,
+    withdrawableLamports,
+  };
+}
+
+// ---------- Withdraw fee config ----------
+const WITHDRAWAL_FEE_SOL = Number(process.env.WITHDRAWAL_FEE_SOL || 0.001);
+const WITHDRAWAL_FEE_LAMPORTS = Math.round(WITHDRAWAL_FEE_SOL * LAMPORTS_PER_SOL);
+
 async function main() {
   try {
     if (db.ensureSchema) await db.ensureSchema();
   } catch (e) {
     console.warn("[ensureSchema] failed:", e?.message || e);
   }
+  await ensureWelcomeLockTable();
 
   const app = express();
   app.set("trust proxy", true);
 
-  // ---------- CORS (Frontend: localhost + Vercel) ----------
-  const defaultAllowed = ["http://flipverse-web.vercel.app","http://51.20.249.35:3000", "http://localhost:3000"];
+  // ---------- CORS ----------
+  const defaultAllowed = ["http://flipverse-web.vercel.app","http://51.20.249.35:3000","http://localhost:3000"];
   const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || defaultAllowed.join(","))
     .split(",")
     .map((s) => s.trim())
@@ -191,7 +312,7 @@ async function main() {
 
   const corsOptions = {
     origin(origin, cb) {
-      if (!origin) return cb(null, true); // allow server-to-server / curl
+      if (!origin) return cb(null, true);
       const ok = ALLOW_ORIGINS.includes(origin);
       return cb(ok ? null : new Error("CORS: origin not allowed: " + origin), ok);
     },
@@ -203,10 +324,9 @@ async function main() {
   };
 
   app.use(cors(corsOptions));
-  app.options("*", cors(corsOptions)); // preflight
+  app.options("*", cors(corsOptions));
   app.use(bodyParser.json({ limit: "1mb" }));
 
-  // Optional small error handler for CORS errors → JSON (not HTML)
   app.use((err, _req, res, next) => {
     if (err && String(err.message || "").startsWith("CORS:")) {
       return res.status(403).json({ error: err.message });
@@ -267,7 +387,6 @@ async function main() {
       );
       const affiliateWallet = aff[0]?.owner_wallet || null;
 
-      // Build landing url (always frontend site with ?ref=CODE)
       const landing = `${SITE_URL.replace(/\/$/, "")}/?ref=${encodeURIComponent(codeUp)}`;
 
       if (affiliateWallet) {
@@ -280,7 +399,7 @@ async function main() {
              values ($1,$2,NULL,NULL,$3,$4,$5,$6)`,
             [codeUp, String(affiliateWallet), ip || null, ua, ref, landing]
           );
-        } catch (_) {} // ignore dedupe
+        } catch (_) {}
         return res.redirect(302, landing);
       } else {
         return res.redirect(SITE_URL);
@@ -347,26 +466,19 @@ async function main() {
         out["coinflip"].plays += Number(cf.rows[0].plays || 0);
       }
 
-     if (await db._tableExistsUnsafe?.("slots_spins")) {
-  // rev_lamports is the net in LAMPORTS (bet - payout). Convert to SOL by dividing by 1e9.
-  const ss = await db.pool.query(
-    `select coalesce(sum(bet_amount - payout),0)::numeric as rev_lamports,
-            count(*)::int as plays
-     from slots_spins`
-  );
-
-  // Convert lamports -> SOL
-  const revLamports = Number(ss.rows[0].rev_lamports || 0);
-  const revSol = revLamports / 1e9;
-
-  // Convert SOL -> USD
-  const usd = revSol * Number(process.env.USD_PER_SOL || 200);
-
-  out["slots"] = out["slots"] || { revenue: 0, plays: 0 };
-  out["slots"].revenue += usd;
-  out["slots"].plays += Number(ss.rows[0].plays || 0);
-}
-
+      if (await db._tableExistsUnsafe?.("slots_spins")) {
+        const ss = await db.pool.query(
+          `select coalesce(sum(bet_amount - payout),0)::numeric as rev_lamports,
+                  count(*)::int as plays
+           from slots_spins`
+        );
+        const revLamports = Number(ss.rows[0].rev_lamports || 0);
+        const revSol = revLamports / 1e9;
+        const usd = revSol * Number(process.env.USD_PER_SOL || 200);
+        out["slots"] = out["slots"] || { revenue: 0, plays: 0 };
+        out["slots"].revenue += usd;
+        out["slots"].plays += Number(ss.rows[0].plays || 0);
+      }
     } catch (err) {
       console.error("[computeGameMetrics] error:", err.message);
     }
@@ -467,16 +579,15 @@ async function main() {
         search: String(search),
       });
 
-      // augment with live PDA balances (lamports & USDT)
       const price = await getSolUsd();
       const users = await Promise.all(
         data.users.map(async (u) => {
           const liveLamports = await fetchLivePdaLamports(u.walletAddress);
-          const lam = liveLamports != null ? liveLamports : Number(u.pdaBalance || 0);
+          const lam = liveLamports != null ? liveLamports : Number(u.pdaBalance || 0); // pdaBalance==lamports from DB
           const usdt = (lam / 1e9) * price;
 
           return {
-            ...u, // keep original fields for compatibility
+            ...u,
             pdaBalanceLamports: lam,
             pdaBalanceUsdt: Number(usdt.toFixed(2)),
           };
@@ -526,6 +637,63 @@ async function main() {
       const { status } = req.body || {};
       const updated = await db.updateUserStatus(id, status);
       res.json(updated);
+    } catch (e) {
+      res.status(400).json({ error: e?.message || String(e) });
+    }
+  });
+
+  // NEW: Admin adjust user balance in **USD** (converted to lamports, stored in DB)
+  app.put("/admin/users/:id/balance", async (req, res) => {
+    try {
+      const id = String(req.params.id);
+      const { amount, type, reason } = req.body || {};
+      const amtUsd = Number(amount);
+      if (!isFinite(amtUsd) || amtUsd <= 0) {
+        return res.status(400).json({ error: "amount (USD) required (> 0)" });
+      }
+      const t = String(type || "").toLowerCase();
+      if (t !== "add" && t !== "subtract") {
+        return res.status(400).json({ error: "type must be 'add' or 'subtract'" });
+      }
+      const price = await getSolUsd();
+      const deltaLamports = Math.round((amtUsd / (price || USD_PER_SOL_FALLBACK)) * LAMPORTS_PER_SOL);
+      const signedDelta = t === "add" ? deltaLamports : -deltaLamports;
+
+      await adjustPdaBalanceLamports(id, signedDelta);
+
+      try {
+        await db.recordActivity({
+          user: id,
+          action: `admin_balance_${t}${reason ? `: ${String(reason).slice(0, 200)}` : ""}`,
+          amount: signedDelta / 1e9,
+          amount_usd: t === "add" ? amtUsd : -amtUsd,
+          price_usd_per_sol: price,
+        });
+      } catch (_) {}
+
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  // NEW: Admin toggle withdrawals permission
+  app.put("/admin/users/:id/withdrawals", async (req, res) => {
+    try {
+      const id = String(req.params.id);
+      const { withdrawalsEnabled, reason } = req.body || {};
+      const val = Boolean(withdrawalsEnabled);
+      await db.updateWithdrawalPermissions(id, val);
+
+      try {
+        await db.recordActivity({
+          user: id,
+          action: `admin_withdrawals_${val ? "enabled" : "disabled"}${reason ? `: ${String(reason).slice(0, 200)}` : ""}`,
+          amount: 0,
+        });
+      } catch (_) {}
+
+      res.json({ ok: true, withdrawalsEnabled: val });
     } catch (e) {
       res.status(400).json({ error: e?.message || String(e) });
     }
@@ -629,28 +797,52 @@ async function main() {
     }
   });
 
+  // ---------- Vault config + lock ----------
+  app.get("/vault/config", (_req, res) => {
+    res.json({ withdrawalFeeSol: WITHDRAWAL_FEE_SOL, withdrawalFeeLamports: WITHDRAWAL_FEE_LAMPORTS });
+  });
+
+  app.get("/vault/locked", async (req, res) => {
+    try {
+      const wallet = String(req.query.wallet || "");
+      if (!isMaybeBase58(wallet)) return res.status(400).json({ error: "bad wallet" });
+      const summary = await computeVaultLock(wallet);
+      res.json(summary);
+    } catch (e) {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
   // ---------- Wallet activity endpoints ----------
   app.post("/wallets/:id/deposit", async (req, res) => {
     try {
       const id = String(req.params.id);
       const { amountSol, amountLamports, pdaSol, pdaLamports, txHash } = req.body || {};
 
-      const deltaSol =
-        amountSol != null ? Number(amountSol) : Number(amountLamports || 0) / 1e9;
-      if (!isFinite(deltaSol) || deltaSol <= 0) {
+      const deltaLamports =
+        amountLamports != null
+          ? Math.round(Number(amountLamports))
+          : Math.round(Number(amountSol || 0) * LAMPORTS_PER_SOL);
+
+      if (!isFinite(deltaLamports) || deltaLamports <= 0) {
         return res
           .status(400)
           .json({ error: "amountSol or amountLamports required (> 0)" });
       }
 
-      await db.recordActivity({ user: id, action: "deposit", amount: deltaSol, tx_hash: txHash });
+      await db.recordActivity({ user: id, action: "deposit", amount: deltaLamports / 1e9, tx_hash: txHash });
 
       if (pdaSol != null || pdaLamports != null) {
-        const absSol = pdaSol != null ? Number(pdaSol) : Number(pdaLamports || 0) / 1e9;
-        await setAbsolutePdaBalance(id, absSol);
+        const absLamports =
+          pdaLamports != null
+            ? Math.round(Number(pdaLamports))
+            : Math.round(Number(pdaSol || 0) * LAMPORTS_PER_SOL);
+        await setAbsolutePdaBalanceLamports(id, absLamports);
       } else {
-        await adjustPdaBalance(id, deltaSol);
+        await adjustPdaBalanceLamports(id, deltaLamports);
       }
+
+      await setCashExhausted(id, false);
 
       res.json({ ok: true });
     } catch (e) {
@@ -663,21 +855,27 @@ async function main() {
       const id = String(req.params.id);
       const { amountSol, amountLamports, pdaSol, pdaLamports, txHash } = req.body || {};
 
-      const deltaSol =
-        amountSol != null ? Number(amountSol) : Number(amountLamports || 0) / 1e9;
-      if (!isFinite(deltaSol) || deltaSol <= 0) {
+      const deltaLamports =
+        amountLamports != null
+          ? Math.round(Number(amountLamports))
+          : Math.round(Number(amountSol || 0) * LAMPORTS_PER_SOL);
+
+      if (!isFinite(deltaLamports) || deltaLamports <= 0) {
         return res
           .status(400)
           .json({ error: "amountSol or amountLamports required (> 0)" });
       }
 
-      await db.recordActivity({ user: id, action: "withdraw", amount: deltaSol, tx_hash: txHash });
+      await db.recordActivity({ user: id, action: "withdraw", amount: deltaLamports / 1e9, tx_hash: txHash });
 
       if (pdaSol != null || pdaLamports != null) {
-        const absSol = pdaSol != null ? Number(pdaSol) : Number(pdaLamports || 0) / 1e9;
-        await setAbsolutePdaBalance(id, absSol);
+        const absLamports =
+          pdaLamports != null
+            ? Math.round(Number(pdaLamports))
+            : Math.round(Number(pdaSol || 0) * LAMPORTS_PER_SOL);
+        await setAbsolutePdaBalanceLamports(id, absLamports);
       } else {
-        await adjustPdaBalance(id, -deltaSol);
+        await adjustPdaBalanceLamports(id, -deltaLamports);
       }
 
       res.json({ ok: true });
@@ -703,8 +901,8 @@ async function main() {
   // ---------- Admin Bot (REST + WS feed) ----------
   try {
     const { attachBotFeed, attachBotAdmin } = require("./bot_engine");
-    attachBotAdmin?.(app); // mounts /admin/bot/* endpoints
-    attachBotFeed?.(ioPlaceholder()); // placeholder; reattached with real io below
+    attachBotAdmin?.(app);
+    attachBotFeed?.(ioPlaceholder());
   } catch (e) {
     console.warn("bot_engine not found / failed to mount:", e?.message || e);
   }
@@ -730,26 +928,11 @@ async function main() {
   } catch {}
 
   // -------------------------
-  // PERSISTENT ADMIN SETTINGS
+  // PERSISTENT ADMIN SETTINGS (unchanged except mounts)
   // -------------------------
-  //
-  // NOTE: This block requires `bcrypt` in your dependencies:
-  //   npm i bcrypt
-  //
-  // It persists admin profile, admin credentials (bcrypt hashed), and maintenance
-  // configuration into a small `admin_settings` key/value table (jsonb).
-  //
-  // Protection: set ADMIN_API_KEY in your .env and call endpoints with:
-  //   Authorization: Bearer <ADMIN_API_KEY>
-  //
-  // If ADMIN_API_KEY is not set, requireAdmin will allow (dev mode) but log a warning.
-  //
-  // Insert this block here so `io` exists for socket emits.
-
   try {
     const bcrypt = require("bcrypt");
     const SALT_ROUNDS = Number(process.env.PASSWORD_SALT_ROUNDS || 10);
-    // Ensure admin_settings table exists
     async function ensureAdminSettingsTable() {
       try {
         await db.pool.query(`
@@ -782,7 +965,6 @@ async function main() {
       return obj;
     }
 
-    // Admin auth middleware
     function requireAdmin(req, res, next) {
       try {
         if (!process.env.ADMIN_API_KEY) {
@@ -796,11 +978,10 @@ async function main() {
         if (token !== process.env.ADMIN_API_KEY) return res.status(403).json({ error: "forbidden" });
         return next();
       } catch (e) {
-        return res.status(500).json({ error: "internal" });
+        return next(e);
       }
     }
 
-    // Admin profile helpers
     async function getAdminProfile() {
       const profile = await readAdminSetting("admin_profile");
       if (profile) return profile;
@@ -829,7 +1010,6 @@ async function main() {
       return c;
     }
 
-    // Maintenance helpers
     const MAINT_KEY = "maintenance";
     async function getMaintenanceConfig() {
       const stored = await readAdminSetting(MAINT_KEY);
@@ -850,8 +1030,7 @@ async function main() {
       return Object.assign(base, stored);
     }
 
-    // --- Endpoints: admin profile / credentials / maintenance ---
-    app.get("/admin/me", requireAdmin, async (req, res) => {
+    app.get("/admin/me", requireAdmin, async (_req, res) => {
       try {
         const p = await getAdminProfile();
         return res.json(p);
@@ -876,8 +1055,6 @@ async function main() {
       }
     });
 
-    // Change password
-    // body: { currentPassword, newPassword }
     app.put("/admin/users/:id/password", requireAdmin, async (req, res) => {
       try {
         const { currentPassword, newPassword } = req.body || {};
@@ -890,8 +1067,6 @@ async function main() {
           if (!currentPassword) return res.status(400).json({ error: "currentPassword required" });
           const ok = await bcrypt.compare(String(currentPassword), String(creds.passwordHash));
           if (!ok) return res.status(403).json({ error: "currentPassword incorrect" });
-        } else {
-          // no stored password yet - allow set (protected by ADMIN_API_KEY via requireAdmin)
         }
 
         const hash = await bcrypt.hash(String(newPassword), SALT_ROUNDS);
@@ -902,8 +1077,7 @@ async function main() {
       }
     });
 
-    // Maintenance endpoints
-    app.get("/admin/maintenance", requireAdmin, async (req, res) => {
+    app.get("/admin/maintenance", requireAdmin, async (_req, res) => {
       try {
         const cfg = await getMaintenanceConfig();
         return res.json(cfg);
@@ -950,7 +1124,7 @@ async function main() {
       }
     });
 
-    app.post("/admin/maintenance/toggle", requireAdmin, async (req, res) => {
+    app.post("/admin/maintenance/toggle", requireAdmin, async (_req, res) => {
       try {
         const cur = await getMaintenanceConfig();
         cur.isEnabled = !Boolean(cur.isEnabled);
@@ -965,7 +1139,8 @@ async function main() {
     console.warn("[admin settings block] failed to init:", err?.message || err);
   }
 
-  // ----- BAN GATE -----
+  // ---------- Socket.IO gates and withdraw flow ----------
+  // BAN GATE
   io.use(async (socket, next) => {
     try {
       const w = socket.handshake?.auth?.wallet;
@@ -978,9 +1153,6 @@ async function main() {
     }
   });
 
-  // Load solana instruction helper (you already uploaded `solana_anchor_ix.js`)
-  // This module should export a function to build the withdraw instruction, e.g.:
-  //    ixWithdraw({ programId, player, userVault, amountLamports }) -> TransactionInstruction
   let solanaAnchorIx = null;
   try {
     solanaAnchorIx = require("./solana_anchor_ix");
@@ -989,6 +1161,10 @@ async function main() {
   }
 
   io.on("connection", (socket) => {
+    try {
+      socket.emit("vault:config", { withdrawalFeeSol: WITHDRAWAL_FEE_SOL, withdrawalFeeLamports: WITHDRAWAL_FEE_LAMPORTS });
+    } catch {}
+
     socket.onAny(async (_event, ...args) => {
       try {
         const w = socket.handshake?.auth?.wallet || extractWalletFromArgs(args);
@@ -999,14 +1175,7 @@ async function main() {
       } catch {}
     });
 
-    //
-    // NEW: handle withdraw prepare requests
-    //
-    // Client emits: socket.emit("vault:withdraw_prepare", { player, amountLamports, withdrawAddress })
-    // Server replies with:
-    //   - socket.emit("vault:withdraw_tx", { transactionBase64 })  // unsigned versioned tx (client signs & sends)
-    //   - or socket.emit("vault:error", { message })
-    //
+    // Prepare withdraw (server enforces permissions + lock + live PDA)
     socket.on("vault:withdraw_prepare", async (data) => {
       try {
         if (!data || typeof data !== "object") {
@@ -1022,27 +1191,38 @@ async function main() {
           socket.emit("vault:error", { message: "invalid player / withdraw address" });
           return;
         }
+        // must withdraw to self
+        if (withdrawAddress !== player) {
+          socket.emit("vault:error", { message: "withdraw address must equal player wallet" });
+          return;
+        }
         if (!Number.isFinite(amountLamports) || amountLamports <= 0) {
           socket.emit("vault:error", { message: "invalid amountLamports" });
           return;
         }
 
-        // derive the user_vault PDA & check balance
-        let userVault;
-        try {
-          userVault = deriveUserVaultPda(player);
-        } catch (e) {
-          socket.emit("vault:error", { message: "bad player pubkey" });
+        // NEW: check withdrawals permission
+        if (!(await db.isUserWithdrawalsEnabled(player))) {
+          socket.emit("vault:error", { message: "withdrawals disabled by admin" });
           return;
         }
 
+        // Server-side allowance (locked + latch)
+        const lock = await computeVaultLock(player);
+        const allowedLamports = Math.max(0, lock.withdrawableLamports);
+        if (amountLamports > allowedLamports) {
+          socket.emit("vault:error", { message: "requested amount exceeds withdrawable balance" });
+          return;
+        }
+
+        // Ensure PDA actually has at least this much now
+        const userVault = deriveUserVaultPda(player);
         const pdaBalance = await connection.getBalance(userVault, "confirmed");
         if (pdaBalance < amountLamports) {
           socket.emit("vault:error", { message: "insufficient vault balance" });
           return;
         }
 
-        // Build withdraw instruction. This code assumes solana_anchor_ix.ixWithdraw exists and returns a TransactionInstruction.
         if (!solanaAnchorIx || typeof solanaAnchorIx.ixWithdraw !== "function") {
           socket.emit("vault:error", { message: "server missing withdraw instruction builder (solana_anchor_ix.ixWithdraw)" });
           return;
@@ -1055,9 +1235,7 @@ async function main() {
           amount: amountLamports,
         });
 
-        // create a versioned message where the fee payer is the player's wallet
         const { blockhash } = await connection.getLatestBlockhash("confirmed");
-
         const messageV0 = new TransactionMessage({
           payerKey: new PublicKey(player),
           recentBlockhash: blockhash,
@@ -1065,11 +1243,8 @@ async function main() {
         }).compileToV0Message();
 
         const vtx = new VersionedTransaction(messageV0);
-
-        // serialize unsigned vtx to send to client for signing
         const txBase64 = Buffer.from(vtx.serialize()).toString("base64");
 
-        // optional: record prepare activity
         try {
           await db.recordActivity({
             user: player,
@@ -1081,18 +1256,17 @@ async function main() {
           console.warn("[db.recordActivity] withdraw_prepare failed:", e?.message || e);
         }
 
-        // send back tx
-        socket.emit("vault:withdraw_tx", { transactionBase64: txBase64 });
+        socket.emit("vault:withdraw_tx", { transactionBase64: txBase64, requestId: data?.clientRequestId || null });
       } catch (err) {
         console.error("[vault:withdraw_prepare] error:", err?.message || err);
         try {
           socket.emit("vault:error", { message: String(err?.message || err) });
         } catch {}
       }
-    }); // end vault:withdraw_prepare
+    });
   });
 
-  // WS mounts (if present)
+  // WS mounts
   function mountWs(modulePath, name, attachName) {
     try {
       const mod = require(modulePath);
@@ -1148,10 +1322,9 @@ async function main() {
     console.warn(e);
   }
 
-  // mount promos admin router (add this)
   try {
-    const promosAdminRouter = require("./admin_promotion_router"); // <-- adjust path if needed
-    app.use("/promo", promosAdminRouter); // admin routes are defined as "/admin/..." inside that router
+    const promosAdminRouter = require("./admin_promotion_router");
+    app.use("/promo", promosAdminRouter);
     console.log("Promos ADMIN router mounted at /promo/admin");
   } catch (e) {
     console.warn("promos_admin_router not found / failed to mount:", e?.message || e);
@@ -1164,16 +1337,13 @@ async function main() {
     console.warn("welcome_bonus_router not found / failed to mount:", e?.message || e);
   }
 
-    // mount dev admin login route (returns ADMIN_API_KEY on success)
   try {
-    const adminAuthRouter = require('./admin_auth_router'); // path relative to server.js
-    // mount it under /admin so that router's /login maps to /admin/login
-    app.use('/admin', adminAuthRouter);
-    console.log('admin_auth_router mounted at /admin');
+    const adminAuthRouter = require("./admin_auth_router");
+    app.use("/admin", adminAuthRouter);
+    console.log("admin_auth_router mounted at /admin");
   } catch (e) {
-    console.warn('admin_auth_router not mounted:', e?.message || e);
+    console.warn("admin_auth_router not mounted:", e?.message || e);
   }
-
 
   server.listen(PORT, () => {
     console.log(
