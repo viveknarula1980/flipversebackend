@@ -738,3 +738,80 @@ CREATE TABLE IF NOT EXISTS promotions (
 -- optional index for faster search by name/code
 CREATE INDEX IF NOT EXISTS promotions_name_idx ON promotions (lower(name));
 CREATE INDEX IF NOT EXISTS promotions_code_idx ON promotions (lower(code));
+
+
+-- provably-fair metadata + resolved tx pointer
+ALTER TABLE bets
+  ADD COLUMN IF NOT EXISTS client_seed        text           DEFAULT '' NOT NULL,
+  ADD COLUMN IF NOT EXISTS server_seed_hash   text,
+  ADD COLUMN IF NOT EXISTS server_seed_hex    text,
+  ADD COLUMN IF NOT EXISTS first_hmac_hex     text,
+  ADD COLUMN IF NOT EXISTS resolved_tx_sig    text,
+  ADD COLUMN IF NOT EXISTS resolved_at        timestamptz,
+  ADD COLUMN IF NOT EXISTS win                boolean,
+  ADD COLUMN IF NOT EXISTS rtp_bps            int,
+  ADD COLUMN IF NOT EXISTS fee_bps            int;
+
+
+
+-- === Promo/Fake Balance: additive, safe to run multiple times ===
+
+-- Extend app_users with promo balance + per-user fake mode flag
+ALTER TABLE IF EXISTS app_users
+  ADD COLUMN IF NOT EXISTS promo_balance_lamports BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS use_fake BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- withdrawals flag table (if your project already has it, this will no-op)
+CREATE TABLE IF NOT EXISTS admin_user_flags (
+  wallet TEXT PRIMARY KEY,
+  withdrawals_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- function to clamp promo balance >= 0
+CREATE OR REPLACE FUNCTION clamp_zero_bigint(v BIGINT)
+RETURNS BIGINT
+LANGUAGE SQL IMMUTABLE AS $$
+  SELECT CASE WHEN $1 < 0 THEN 0 ELSE $1 END;
+$$;
+
+-- index for quick lookups
+CREATE INDEX IF NOT EXISTS idx_app_users_promo ON app_users (promo_balance_lamports);
+
+
+
+
+-- coinflip_matches schema guard
+CREATE TABLE IF NOT EXISTS coinflip_matches (
+  id BIGSERIAL PRIMARY KEY,
+  nonce BIGINT UNIQUE NOT NULL,
+  player_a TEXT NOT NULL,
+  player_b TEXT NOT NULL,
+  side_a INT NOT NULL,
+  side_b INT NOT NULL,
+  bet_lamports BIGINT NOT NULL,
+  outcome INT,                               -- allow NULL while locked
+  winner TEXT,
+  payout_lamports BIGINT NOT NULL DEFAULT 0,
+  fee_bps INT NOT NULL DEFAULT 600,
+  resolve_sig_winner TEXT,
+  resolve_sig_loser TEXT,
+  server_seed_hash TEXT,
+  server_seed TEXT,
+  first_hmac_hex TEXT,
+  client_seed_a TEXT NOT NULL DEFAULT '',
+  client_seed_b TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'locked',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  resolved_at timestamptz
+);
+
+-- relax old constraints if they exist
+ALTER TABLE coinflip_matches ALTER COLUMN outcome DROP NOT NULL;
+ALTER TABLE coinflip_matches ALTER COLUMN payout_lamports SET DEFAULT 0;
+ALTER TABLE coinflip_matches ALTER COLUMN fee_bps SET DEFAULT 600;
+ALTER TABLE coinflip_matches ALTER COLUMN status SET DEFAULT 'locked';
+
+-- indexes for your /coinflip/resolved query
+CREATE INDEX IF NOT EXISTS idx_cf_a_status_id ON coinflip_matches (player_a, status, id DESC);
+CREATE INDEX IF NOT EXISTS idx_cf_b_status_id ON coinflip_matches (player_b, status, id DESC);

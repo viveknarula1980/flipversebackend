@@ -1,363 +1,19 @@
-// // backend/dice_ws.js — Dice WS (single-popup, server fee-payer resolve)
+// dice_ws.js — Provably-Fair Dice (WS + REST) with **fake/promo balance** toggle per user
+//
+// Behavior:
+// - If user is in fake mode (use_fake=TRUE or promo_balance_lamports>0), the server runs dice **off-chain**,
+//   freezing the promo balance on "place" and crediting payout on "resolve". Events & REST stay identical.
+// - If not fake, it uses your on-chain flow exactly as before.
+//
+// REST:
+//   GET /dice/resolved?wallet=...&limit=...&cursor=...
+//
+// Socket.IO events:
+//   dice:place   -> emits dice:locked {nonce, txSig, serverSeedHash}          (txSig="FAKE-LOCK-<nonce>" in fake mode)
+//   dice:resolve -> emits dice:resolved {...} then dice:reveal_seed {...}     (txSig="FAKE-RESOLVE-<nonce>" in fake mode)
 
-// const crypto = require("crypto");
-// const {
-//   PublicKey,
-//   VersionedTransaction,
-//   TransactionMessage,
-//   SystemProgram,
-//   ComputeBudgetProgram,
-// } = require("@solana/web3.js");
-
-// const {
-//   connection,
-//   PROGRAM_ID,                // Dice program id (same one used in your HTTP dice endpoints)
-//   deriveVaultPda,
-//   deriveAdminPda,
-//   buildEd25519VerifyIx,
-// } = require("./solana");
-
-// const { roll1to100 } = require("./rng");
-// const {
-//   ADMIN_PK,
-//   buildMessageBytes,
-//   signMessageEd25519,
-//   getServerKeypair,
-// } = require("./signer");
-
-// const DB = global.db || require("./db");
-
-// const SYSVAR_INSTRUCTIONS_PUBKEY = new PublicKey(
-//   "Sysvar1nstructions1111111111111111111111111"
-// );
-
-// // ---------- Helpers ----------
-// function anchorDisc(globalSnakeName) {
-//   return crypto.createHash("sha256").update(`global:${globalSnakeName}`).digest().slice(0, 8);
-// }
-// function encodePlaceBetLockArgs({ betAmount, betType, target, nonce, expiryUnix }) {
-//   // [disc:8][u64 bet_amount][u8 bet_type][u8 target][u64 nonce][i64 expiry]
-//   const disc = anchorDisc("place_bet_lock");
-//   const buf = Buffer.alloc(8 + 8 + 1 + 1 + 8 + 8);
-//   let o = 0;
-//   disc.copy(buf, o); o += 8;
-//   buf.writeBigUInt64LE(BigInt(betAmount), o); o += 8;
-//   buf.writeUInt8(betType & 0xff, o++); buf.writeUInt8(target & 0xff, o++);
-//   buf.writeBigUInt64LE(BigInt(nonce), o); o += 8;
-//   buf.writeBigInt64LE(BigInt(expiryUnix), o); o += 8;
-//   return buf;
-// }
-// function encodeResolveBetArgs({ roll, payout, ed25519InstrIndex }) {
-//   // [disc:8][u8 roll][u64 payout][u8 ed_index]
-//   const disc = anchorDisc("resolve_bet");
-//   const buf = Buffer.alloc(8 + 1 + 8 + 1);
-//   let o = 0;
-//   disc.copy(buf, o); o += 8;
-//   buf.writeUInt8(roll & 0xff, o++); buf.writeBigUInt64LE(BigInt(payout), o); o += 8;
-//   buf.writeUInt8(ed25519InstrIndex & 0xff, o++);
-//   return buf;
-// }
-// function placeBetLockKeys({ player, vaultPda, pendingBetPda }) {
-//   return [
-//     { pubkey: player, isSigner: true, isWritable: true },
-//     { pubkey: vaultPda, isSigner: false, isWritable: true },
-//     { pubkey: pendingBetPda, isSigner: false, isWritable: true },
-//     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-//   ];
-// }
-// function resolveBetKeys({ player, vaultPda, adminPda, pendingBetPda }) {
-//   return [
-//     { pubkey: player, isSigner: false, isWritable: true },
-//     { pubkey: vaultPda, isSigner: false, isWritable: true },
-//     { pubkey: adminPda, isSigner: false, isWritable: false },
-//     { pubkey: pendingBetPda, isSigner: false, isWritable: true },
-//     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-//     { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
-//   ];
-// }
-// function toBetTypeNum(x) {
-//   if (typeof x === "string") return x.toLowerCase() === "over" ? 1 : 0; // over=1, under=0
-//   return Number(x) ? 1 : 0;
-// }
-
-// // Payout: RTP-basis * bet / odds
-// function computePayoutLamports({ betLamports, rtp_bps, win_odds }) {
-//   if (win_odds < 1 || win_odds > 99) return 0n;
-//   const bet = BigInt(betLamports);
-//   const rtp = BigInt(rtp_bps);
-//   const denom = 100n * BigInt(win_odds);
-//   return (bet * rtp) / denom;
-// }
-
-// // ---------- State ----------
-// const dicePending = new Map(); // nonce -> { player, betLamports, betTypeNum, target }
-
-// // ---------- WS ----------
-// function attachDice(io) {
-//   io.on("connection", (socket) => {
-//     socket.on("register", ({ player }) => {
-//       socket.data.player = String(player || "guest");
-//     });
-
-//     // STEP 1 — client asks for lock (deposit) tx to sign
-//     socket.on("dice:prepare_lock", async ({ player, betAmountLamports, betType, targetNumber }) => {
-//       try {
-//         if (!player) return socket.emit("dice:error", { code: "NO_PLAYER", message: "player required" });
-
-//         const playerPk = new PublicKey(player);
-//         const betTypeNum = toBetTypeNum(betType);
-//         const target = Number(targetNumber);
-
-//         // admin gate + min/max
-//         const cfg = await DB.getGameConfig?.("dice");
-//         if (cfg && (!cfg.enabled || !cfg.running)) {
-//           return socket.emit("dice:error", { code: "DISABLED", message: "Dice disabled by admin" });
-//         }
-//         const min = BigInt(cfg?.min_bet_lamports ?? 50000);
-//         const max = BigInt(cfg?.max_bet_lamports ?? 5_000_000_000n);
-
-//         const betLamports = BigInt(betAmountLamports || 0);
-//         if (betLamports < min || betLamports > max) {
-//           return socket.emit("dice:error", { code: "BET_RANGE", message: "Bet outside allowed range" });
-//         }
-//         if (!(target >= 2 && target <= 98)) {
-//           return socket.emit("dice:error", { code: "BAD_TARGET", message: "Target must be 2..98" });
-//         }
-
-//         const vaultPda = deriveVaultPda();
-//         const nonce = Date.now();
-//         const expiryUnix = Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
-
-//         const nb = Buffer.alloc(8); nb.writeBigUInt64LE(BigInt(nonce));
-//         const pendingBetPda = PublicKey.findProgramAddressSync(
-//           [Buffer.from("bet"), playerPk.toBuffer(), nb],
-//           PROGRAM_ID
-//         )[0];
-
-//         const data = encodePlaceBetLockArgs({
-//           betAmount: betLamports,
-//           betType: betTypeNum,
-//           target,
-//           nonce,
-//           expiryUnix,
-//         });
-//         const keys = placeBetLockKeys({ player: playerPk, vaultPda, pendingBetPda });
-//         const ix = { programId: PROGRAM_ID, keys, data };
-
-//         const cuPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
-//         const cuLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 300_000 });
-
-//         const { blockhash } = await connection.getLatestBlockhash("confirmed");
-//         const msgV0 = new TransactionMessage({
-//           payerKey: playerPk,
-//           recentBlockhash: blockhash,
-//           instructions: [cuPriceIx, cuLimitIx, ix],
-//         }).compileToV0Message();
-//         const vtx = new VersionedTransaction(msgV0);
-//         const txBase64 = Buffer.from(vtx.serialize()).toString("base64");
-
-//         // persist pending context (memory and/or DB)
-//         dicePending.set(nonce, {
-//           player,
-//           betLamports,
-//           betTypeNum,
-//           target,
-//         });
-
-//         try {
-//           await DB.recordBet?.({
-//             player: playerPk.toBase58(),
-//             amount: String(betLamports),
-//             betType: betTypeNum,
-//             target,
-//             roll: 0,
-//             payout: 0,
-//             nonce,
-//             expiry: expiryUnix,
-//             signature_base58: "",
-//           });
-//         } catch (e) {
-//           console.warn("[dice] recordBet warn:", e?.message || e);
-//         }
-
-//         socket.emit("dice:lock_tx", {
-//           nonce: String(nonce),
-//           expiryUnix,
-//           transactionBase64: txBase64,
-//         });
-//       } catch (e) {
-//         console.error("dice:prepare_lock error:", e);
-//         socket.emit("dice:error", { code: "PREPARE_FAIL", message: String(e.message || e) });
-//       }
-//     });
-
-//     // STEP 2 — server resolves on-chain as fee payer; client does NOT sign again
-//     socket.on("dice:prepare_resolve", async ({ player, nonce }) => {
-//       try {
-//         if (!player) return socket.emit("dice:error", { code: "NO_PLAYER", message: "player required" });
-//         if (!nonce)  return socket.emit("dice:error", { code: "NO_NONCE",  message: "nonce required" });
-
-//         const playerPk = new PublicKey(player);
-//         let ctx = dicePending.get(Number(nonce));
-
-//         // Load from DB if not in memory
-//         if (!ctx && typeof DB.getBetByNonce === "function") {
-//           const row = await DB.getBetByNonce(Number(nonce)).catch(() => null);
-//           if (row) {
-//             ctx = {
-//               player,
-//               betLamports: BigInt(row.bet_amount_lamports),
-//               betTypeNum: Number(row.bet_type),
-//               target: Number(row.target),
-//             };
-//           }
-//         }
-//         if (!ctx) {
-//           return socket.emit("dice:error", { code: "NOT_FOUND", message: "no prepared dice bet for nonce" });
-//         }
-
-//         // RTP from rules (fallback 9900 bps)
-//         let rtp_bps = 9900;
-//         try {
-//           const rules = await DB.getRules?.();
-//           if (rules?.rtp_bps) rtp_bps = Number(rules.rtp_bps);
-//         } catch {}
-
-//         // Roll & payout
-//         const roll = roll1to100();
-//         const win_odds = ctx.betTypeNum === 0 ? ctx.target - 1 : 100 - ctx.target;
-//         if (win_odds < 1 || win_odds > 99) throw new Error("Invalid win odds");
-//         const win = ctx.betTypeNum === 0 ? roll < ctx.target : roll > ctx.target;
-
-//         const payoutLamports = win
-//           ? Number(computePayoutLamports({ betLamports: ctx.betLamports, rtp_bps, win_odds }))
-//           : 0;
-
-//         // Build resolve tx with server fee payer
-//         const vaultPda = deriveVaultPda();
-//         const adminPda = deriveAdminPda();
-
-//         const expiryUnix = Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
-
-//         const msg = buildMessageBytes({
-//           programId: PROGRAM_ID.toBuffer(),
-//           vault: vaultPda.toBuffer(),
-//           player: playerPk.toBuffer(),
-//           betAmount: Number(ctx.betLamports),
-//           betType: Number(ctx.betTypeNum),
-//           target: Number(ctx.target),
-//           roll,
-//           payout: payoutLamports,
-//           nonce: Number(nonce),
-//           expiryUnix: Number(expiryUnix),
-//         });
-
-//         const edSig = await signMessageEd25519(msg);
-//         const edIx  = buildEd25519VerifyIx({ message: msg, signature: edSig, publicKey: ADMIN_PK });
-//         const edIndex = 1; // [CU, edIx, resolve]
-
-//         const nb = Buffer.alloc(8); nb.writeBigUInt64LE(BigInt(nonce));
-//         const pendingBetPda = PublicKey.findProgramAddressSync(
-//           [Buffer.from("bet"), playerPk.toBuffer(), nb],
-//           PROGRAM_ID
-//         )[0];
-
-//         const data = encodeResolveBetArgs({
-//           roll,
-//           payout: payoutLamports,
-//           ed25519InstrIndex: edIndex,
-//         });
-//         const keys = resolveBetKeys({ player: playerPk, vaultPda, adminPda, pendingBetPda });
-//         const ixResolve = { programId: PROGRAM_ID, keys, data };
-
-//         const feePayer = await getServerKeypair();
-//         const cuPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
-//         const cuLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
-
-//         const { blockhash } = await connection.getLatestBlockhash("confirmed");
-//         const msgV0 = new TransactionMessage({
-//           payerKey: feePayer.publicKey,
-//           recentBlockhash: blockhash,
-//           instructions: [cuPriceIx, cuLimitIx, edIx, ixResolve],
-//         }).compileToV0Message();
-
-//         const vtx = new VersionedTransaction(msgV0);
-
-//         // (optional) simulate
-//         const sim = await connection.simulateTransaction(vtx, { sigVerify: false });
-//         if (sim.value.err) {
-//           const logs = (sim.value.logs || []).join("\n");
-//           throw new Error(`Dice resolve simulate failed: ${JSON.stringify(sim.value.err)}\n${logs}`);
-//         }
-
-//         vtx.sign([feePayer]);
-//         const sig = await connection.sendRawTransaction(vtx.serialize(), {
-//           skipPreflight: false,
-//           maxRetries: 5,
-//         });
-//         await connection.confirmTransaction(sig, "confirmed");
-
-//         // persist unified stats
-//         try {
-//           await DB.recordGameRound?.({
-//             game_key: "dice",
-//             player,
-//             nonce: Number(nonce),
-//             stake_lamports: Number(ctx.betLamports),
-//             payout_lamports: Number(payoutLamports),
-//             result_json: {
-//               roll,
-//               betType: ctx.betTypeNum === 0 ? "under" : "over",
-//               target: ctx.target,
-//               win,
-//             },
-//           });
-//           if (payoutLamports > 0) {
-//             await DB.recordActivity?.({
-//               user: player,
-//               action: "Dice win",
-//               amount: (Number(payoutLamports) / 1e9).toFixed(4),
-//             });
-//           }
-//           if (typeof DB.updateBetPrepared === "function") {
-//             await DB.updateBetPrepared({
-//               nonce: Number(nonce),
-//               roll,
-//               payout: Number(payoutLamports),
-//               resolve_sig: sig,
-//             }).catch(()=>{});
-//           }
-//         } catch (e) {
-//           console.warn("[dice] DB save warn:", e?.message || e);
-//         }
-
-//         // final message to client — NO SECOND POPUP
-//         socket.emit("dice:resolved", {
-//           nonce: String(nonce),
-//           roll,
-//           win,
-//           payoutLamports: Number(payoutLamports),
-//           txSig: sig,
-//         });
-
-//         dicePending.delete(Number(nonce));
-//       } catch (e) {
-//         console.error("dice:prepare_resolve error:", e);
-//         socket.emit("dice:error", { code: "RESOLVE_PREP_FAIL", message: String(e.message || e) });
-//       }
-//     });
-//   });
-// }
-
-// module.exports = { attachDice };
-
-
-// user vault //
-
-
-// backend/dice_ws.js
-// backend/dice_ws.js
-// dice_ws.js (updated for provably-fair)
+const crypto = require("crypto");
+const express = require("express");
 const {
   PublicKey,
   VersionedTransaction,
@@ -383,9 +39,6 @@ const {
   ixResolve,
 } = require("./solana_anchor_ix");
 
-// removed roll1to100 usage - use HMAC-based provably-fair RNG
-// const { roll1to100 } = require("./rng");
-
 const {
   ADMIN_PK,
   buildMessageBytes,
@@ -393,16 +46,20 @@ const {
   getServerKeypair,
 } = require("./signer");
 
-const crypto = require("crypto");
-
 const DB = global.db || require("./db");
-const { precheckOrThrow } = require("./bonus_guard");
+const Promo = require("./promo_balance");
 
+// bonus checks optional
+let precheckOrThrow = async () => {};
+try { ({ precheckOrThrow } = require("./bonus_guard")); } catch (_) {}
+
+function isMaybeBase58(s) {
+  return typeof s === "string" && s.length >= 32 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(s);
+}
 function toBetTypeNum(x) {
   if (typeof x === "string") return x.toLowerCase() === "over" ? 1 : 0;
   return Number(x) ? 1 : 0;
 }
-
 function computePayoutLamports({ betLamports, rtp_bps, win_odds }) {
   if (win_odds < 1 || win_odds > 99) return 0n;
   const bet = BigInt(betLamports);
@@ -410,40 +67,318 @@ function computePayoutLamports({ betLamports, rtp_bps, win_odds }) {
   const denom = 100n * BigInt(win_odds);
   return (bet * rtp) / denom;
 }
-
-const dicePending = new Map();
-
-/**
- * HMAC_SHA256(serverSeedHex, messageStr) => Buffer
- */
 function hmacSha256Buf(serverSeedHex, messageStr) {
-  return crypto.createHmac("sha256", Buffer.from(serverSeedHex, "hex")).update(String(messageStr)).digest();
+  return crypto
+    .createHmac("sha256", Buffer.from(serverSeedHex, "hex"))
+    .update(String(messageStr))
+    .digest();
 }
-
-/**
- * Derive dice roll 1..100 using HMAC(serverSeed, clientSeed + nonce)
- * This is deterministic and verifiable once serverSeed is revealed.
- */
 function deriveDiceRoll({ serverSeedHex, clientSeed, nonce }) {
-  const msg = String(clientSeed || "") + String(nonce);
-  const buf = hmacSha256Buf(serverSeedHex, msg);
-  // use first 4 bytes as uint32
+  const buf = hmacSha256Buf(serverSeedHex, String(clientSeed || "") + String(nonce));
   const v = buf.readUInt32BE(0) >>> 0;
   const roll = (v % 100) + 1; // 1..100
-  // also return saltedHex for debug/verification
   return { roll, hmacHex: buf.toString("hex") };
 }
 
-function attachDice(io) {
-  io.on("connection", (socket) => {
-    socket.on("register", ({ player }) => {
-      socket.data.player = String(player || "guest");
-    });
+// ---------------- schema helpers ----------------
+async function ensureDiceSchema() {
+  if (!DB?.pool) return;
+  await DB.pool.query(`
+    ALTER TABLE IF EXISTS bets
+      ADD COLUMN IF NOT EXISTS client_seed        text not null default '',
+      ADD COLUMN IF NOT EXISTS server_seed_hash   text,
+      ADD COLUMN IF NOT EXISTS server_seed_hex    text,
+      ADD COLUMN IF NOT EXISTS first_hmac_hex     text,
+      ADD COLUMN IF NOT EXISTS resolved_tx_sig    text,
+      ADD COLUMN IF NOT EXISTS resolved_at        timestamptz,
+      ADD COLUMN IF NOT EXISTS win                boolean,
+      ADD COLUMN IF NOT EXISTS rtp_bps            int,
+      ADD COLUMN IF NOT EXISTS fee_bps            int;
 
-    // ---- Vault ops (kept unchanged) ----
+    CREATE INDEX IF NOT EXISTS idx_bets_player_status_created
+      ON bets (player, status, created_at desc);
+  `);
+}
+const _colHas = new Map();
+async function colExists(table, column) {
+  const key = `${table}.${column}`;
+  if (_colHas.has(key)) return _colHas.get(key);
+  if (!DB?.pool) return false;
+  const { rows } = await DB.pool.query(
+    `select 1 from information_schema.columns where table_name=$1 and column_name=$2 limit 1`,
+    [table, column]
+  );
+  const ok = rows.length > 0;
+  _colHas.set(key, ok);
+  return ok;
+}
+async function selectProjectionBets() {
+  const want = [
+    "id",
+    "player",
+    "bet_amount_lamports",
+    "bet_type",
+    "target",
+    "roll",
+    "payout_lamports",
+    "nonce",
+    "status",
+    "signature_base58 as lock_tx_sig",
+    (await colExists("bets", "resolved_tx_sig")) ? "resolved_tx_sig" : "NULL::text as resolved_tx_sig",
+    (await colExists("bets", "client_seed")) ? "client_seed" : "''::text as client_seed",
+    (await colExists("bets", "server_seed_hash")) ? "server_seed_hash" : "NULL::text as server_seed_hash",
+    (await colExists("bets", "server_seed_hex")) ? "server_seed_hex" : "NULL::text as server_seed_hex",
+    (await colExists("bets", "first_hmac_hex")) ? "first_hmac_hex" : "NULL::text as first_hmac_hex",
+    (await colExists("bets", "win")) ? "win" : "NULL::boolean as win",
+    (await colExists("bets", "rtp_bps")) ? "rtp_bps" : "NULL::int as rtp_bps",
+    (await colExists("bets", "fee_bps")) ? "fee_bps" : "NULL::int as fee_bps",
+    "created_at",
+    (await colExists("bets", "resolved_at")) ? "resolved_at" : "NULL::timestamptz as resolved_at",
+  ];
+  return want.join(", ");
+}
+
+// ---------------- DB ops (commitment / reveal) ----------------
+async function dbRecordDiceLock({
+  player,
+  amountLamports,
+  betType,
+  target,
+  nonce,
+  expiry,
+  signature_base58,
+  serverSeedHash,
+  clientSeed,
+}) {
+  if (!DB?.pool) return null;
+  await ensureDiceSchema().catch(() => {});
+  const hasClient = await colExists("bets", "client_seed");
+  const hasHash   = await colExists("bets", "server_seed_hash");
+
+  const cols = [
+    "player", "bet_amount_lamports", "bet_type", "target",
+    "roll", "payout_lamports",
+    "nonce", "expiry_unix", "signature_base58", "status",
+    ...(hasClient ? ["client_seed"] : []),
+    ...(hasHash ? ["server_seed_hash"] : []),
+    "created_at"
+  ];
+  const placeholders = cols.map((_, i) => `$${i+1}`);
+  const vals = [
+    String(player),
+    Math.round(Number(amountLamports) || 0),
+    Number(betType),
+    Number(target),
+    0, 0,
+    Number(nonce),
+    Number(expiry),
+    String(signature_base58 || ""),
+    "prepared_lock",
+    ...(hasClient ? [String(clientSeed || "")] : []),
+    ...(hasHash ? [String(serverSeedHash || "")] : []),
+    new Date()
+  ];
+  const updates = [
+    "player = excluded.player",
+    "bet_amount_lamports = excluded.bet_amount_lamports",
+    "bet_type = excluded.bet_type",
+    "target = excluded.target",
+    "expiry_unix = excluded.expiry_unix",
+    "signature_base58 = excluded.signature_base58",
+    "status = 'prepared_lock'",
+    ...(hasClient ? ["client_seed = excluded.client_seed"] : []),
+    ...(hasHash ? ["server_seed_hash = excluded.server_seed_hash"] : []),
+  ];
+
+  const q = `
+    INSERT INTO bets(${cols.join(",")})
+    VALUES (${placeholders.join(",")})
+    ON CONFLICT (nonce) DO UPDATE SET
+      ${updates.join(", ")}
+    RETURNING *;
+  `;
+  const { rows } = await DB.pool.query(q, vals);
+  return rows[0];
+}
+
+async function dbUpsertDiceResolve({
+  player,
+  betLamports,
+  betTypeNum,
+  target,
+  nonce,
+  roll,
+  payoutLamports,
+  resolvedSig,
+  serverSeedHex,
+  hmacHex,
+  clientSeed,
+  win,
+  rtp_bps,
+  fee_bps,
+}) {
+  if (!DB?.pool) return null;
+  await ensureDiceSchema().catch(() => {});
+
+  const hasClient   = await colExists("bets", "client_seed");
+  const hasSrvHex   = await colExists("bets", "server_seed_hex");
+  const hasFirstH   = await colExists("bets", "first_hmac_hex");
+  const hasResolved = await colExists("bets", "resolved_tx_sig");
+  const hasWin      = await colExists("bets", "win");
+  const hasRtp      = await colExists("bets", "rtp_bps");
+  const hasFee      = await colExists("bets", "fee_bps");
+
+  // Try UPDATE first
+  const setParts = [
+    "roll = $2",
+    "payout_lamports = $3",
+    "status = 'resolved'",
+    "resolved_at = now()",
+  ];
+  const updVals = [ Number(nonce), Number(roll), Math.round(Number(payoutLamports) || 0) ];
+  let p = 4;
+  if (hasResolved) { setParts.push(`resolved_tx_sig = $${p++}`); updVals.push(String(resolvedSig || "")); }
+  if (hasSrvHex)   { setParts.push(`server_seed_hex = $${p++}`);  updVals.push(serverSeedHex ? String(serverSeedHex) : null); }
+  if (hasFirstH)   { setParts.push(`first_hmac_hex = $${p++}`);   updVals.push(hmacHex ? String(hmacHex) : null); }
+  if (hasClient)   { setParts.push(`client_seed = CASE WHEN $${p} <> '' THEN $${p} ELSE client_seed END`); updVals.push(String(clientSeed || "")); p++; }
+  if (hasWin)      { setParts.push(`win = $${p++}`);              updVals.push(!!win); }
+  if (hasRtp)      { setParts.push(`rtp_bps = coalesce($${p++}, rtp_bps)`); updVals.push(rtp_bps == null ? null : Number(rtp_bps)); }
+  if (hasFee)      { setParts.push(`fee_bps = coalesce($${p++}, fee_bps)`); updVals.push(fee_bps == null ? null : Number(fee_bps)); }
+
+  const updQ = `
+    UPDATE bets
+       SET ${setParts.join(", ")}
+     WHERE nonce = $1
+     RETURNING *;
+  `;
+  const upd = await DB.pool.query(updQ, updVals);
+  if (upd.rows.length) return upd.rows[0];
+
+  // Else insert (UPSERT)
+  const cols = ["player","bet_amount_lamports","bet_type","target","roll","payout_lamports","nonce","status","created_at"];
+  const insVals = [
+    String(player),
+    Math.round(Number(betLamports) || 0),
+    Number(betTypeNum),
+    Number(target),
+    Number(roll),
+    Math.round(Number(payoutLamports) || 0),
+    Number(nonce),
+    "resolved",
+    new Date(),
+  ];
+  if (hasResolved) { cols.push("resolved_tx_sig"); insVals.push(String(resolvedSig || "")); }
+  if (hasClient)   { cols.push("client_seed");     insVals.push(String(clientSeed || "")); }
+  if (hasSrvHex)   { cols.push("server_seed_hex"); insVals.push(serverSeedHex ? String(serverSeedHex) : null); }
+  if (hasFirstH)   { cols.push("first_hmac_hex");  insVals.push(hmacHex ? String(hmacHex) : null); }
+  if (hasWin)      { cols.push("win");             insVals.push(!!win); }
+  if (hasRtp)      { cols.push("rtp_bps");         insVals.push(rtp_bps == null ? null : Number(rtp_bps)); }
+  if (hasFee)      { cols.push("fee_bps");         insVals.push(fee_bps == null ? null : Number(fee_bps)); }
+
+  const placeholders = insVals.map((_, i) => `$${i+1}`);
+  const insQ = `
+    INSERT INTO bets(${cols.join(",")})
+    VALUES (${placeholders.join(",")})
+    ON CONFLICT (nonce) DO UPDATE SET
+      roll = excluded.roll,
+      payout_lamports = excluded.payout_lamports,
+      status = 'resolved',
+      ${hasResolved ? "resolved_tx_sig = excluded.resolved_tx_sig," : ""}
+      ${hasClient   ? "client_seed = CASE WHEN excluded.client_seed <> '' THEN excluded.client_seed ELSE bets.client_seed END," : ""}
+      ${hasSrvHex   ? "server_seed_hex = excluded.server_seed_hex," : ""}
+      ${hasFirstH   ? "first_hmac_hex = excluded.first_hmac_hex," : ""}
+      ${hasWin      ? "win = excluded.win," : ""}
+      ${hasRtp      ? "rtp_bps = coalesce(excluded.rtp_bps, bets.rtp_bps)," : ""}
+      ${hasFee      ? "fee_bps = coalesce(excluded.fee_bps, bets.fee_bps)," : ""}
+      resolved_at = now()
+    RETURNING *;
+  `;
+  const ins = await DB.pool.query(insQ, insVals);
+  return ins.rows[0] || null;
+}
+
+async function dbGetBetByNonce(nonce) {
+  if (!DB?.pool) return null;
+  const { rows } = await DB.pool.query(`select * from bets where nonce=$1 limit 1`, [ Number(nonce) ]);
+  return rows[0] || null;
+}
+
+async function dbListDiceResolvedByWallet(wallet, { limit = 50, cursor = null } = {}) {
+  if (!DB?.pool) return { items: [], nextCursor: null };
+  const L = Math.max(1, Math.min(200, Number(limit) || 50));
+  const proj = await selectProjectionBets();
+
+  if (cursor) {
+    const q = `
+      select ${proj}
+      from bets
+      where player = $1 and status = 'resolved' and id < $2
+      order by id desc
+      limit $3
+    `;
+    const { rows } = await DB.pool.query(q, [String(wallet), Number(cursor), L]);
+    const nextCursor = rows.length ? rows[rows.length - 1].id : null;
+    return { items: rows, nextCursor };
+  } else {
+    const q = `
+      select ${proj}
+      from bets
+      where player = $1 and status = 'resolved'
+      order by id desc
+      limit $2
+    `;
+    const { rows } = await DB.pool.query(q, [String(wallet), L]);
+    const nextCursor = rows.length ? rows[rows.length - 1].id : null;
+    return { items: rows, nextCursor };
+  }
+}
+
+// ---------------- in-memory pending ----------------
+const dicePending = new Map();
+
+// ---------------- REST ----------------
+function attachDiceRoutes(app) {
+  if (!app || !app.use) return;
+  const router = express.Router();
+
+  router.get("/resolved", async (req, res) => {
+    try {
+      const wallet = String(req.query.wallet || "");
+      const limit = req.query.limit;
+      const cursor = req.query.cursor;
+      if (!isMaybeBase58(wallet)) return res.status(400).json({ error: "bad wallet" });
+
+      await ensureDiceSchema().catch(() => {});
+      const out = await dbListDiceResolvedByWallet(wallet, { limit, cursor });
+      out.verify = {
+        algorithm: "HMAC_SHA256(serverSeed, clientSeed + nonce)",
+        rollMapping: "uint32_be(hmac)[0:4] % 100 + 1",
+      };
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
+  app.use("/dice", router);
+}
+
+// ---------------- Socket.IO ----------------
+function attachDice(io, app /* optional */) {
+  ensureDiceSchema().catch((e) => console.warn("[ensureDiceSchema] failed:", e?.message || e));
+  try { attachDiceRoutes(app); } catch (_) {}
+
+  io.on("connection", (socket) => {
+    // ---- keep original vault ops (on-chain) for real users ----
     socket.on("vault:activate_prepare", async ({ player, initialDepositLamports = 0 }) => {
       try {
         if (!player) return socket.emit("vault:error", { code: "NO_PLAYER", message: "player required" });
+
+        // If in fake mode we don't build any on-chain tx; just acknowledge (front-end UX usually not used for fake)
+        if (await Promo.isFakeMode(player)) {
+          return socket.emit("vault:activated_fake", { ok: true, player });
+        }
+
         const playerPk = new PublicKey(player);
         const userVault = deriveUserVaultPda(playerPk);
 
@@ -473,6 +408,13 @@ function attachDice(io) {
         if (!player) return socket.emit("vault:error", { code: "NO_PLAYER", message: "player required" });
         if (!amountLamports || Number(amountLamports) <= 0)
           return socket.emit("vault:error", { code: "BAD_AMOUNT", message: "amount required" });
+
+        if (await Promo.isFakeMode(player)) {
+          // In fake mode deposits are admin-driven; we simply reflect promo balance to UI
+          const bal = await Promo.getPromoBalanceLamports(player);
+          return socket.emit("vault:deposit_fake", { ok: true, promoBalanceLamports: bal });
+        }
+
         const playerPk = new PublicKey(player);
         const userVault = deriveUserVaultPda(playerPk);
 
@@ -497,6 +439,14 @@ function attachDice(io) {
         if (!amountLamports || Number(amountLamports) <= 0)
           return socket.emit("vault:error", { code: "BAD_AMOUNT", message: "amount required" });
 
+        // If user is in fake mode OR withdrawals disabled => block
+        if (await Promo.isFakeMode(player)) {
+          return socket.emit("vault:error", { code: "WITHDRAW_DISABLED", message: "withdrawals disabled for promo balance" });
+        }
+        if (!(await Promo.isUserWithdrawalsEnabled(player))) {
+          return socket.emit("vault:error", { code: "WITHDRAW_DISABLED", message: "withdrawals disabled by admin" });
+        }
+
         const playerPk = new PublicKey(player);
         const userVault = deriveUserVaultPda(playerPk);
 
@@ -515,31 +465,74 @@ function attachDice(io) {
       }
     });
 
-    // ---- Dice place (provably-fair added) ----
-    // Accepts optional clientSeed parameter (string). If client doesn't provide it, we set empty string.
+    // ---- Dice: place ----
     socket.on("dice:place", async ({ player, betAmountLamports, betType, targetNumber, clientSeed = "" }) => {
       try {
         if (!player) return socket.emit("dice:error", { code: "NO_PLAYER", message: "player required" });
 
-        const playerPk = new PublicKey(player);
+        const betLamports = BigInt(betAmountLamports || 0);
         const betTypeNum = toBetTypeNum(betType);
         const target = Number(targetNumber);
 
         const cfg = await DB.getGameConfig?.("dice");
         const min = BigInt(cfg?.min_bet_lamports ?? 50000);
         const max = BigInt(cfg?.max_bet_lamports ?? 5_000_000_000n);
-        const betLamports = BigInt(betAmountLamports || 0);
-        if (betLamports < min || betLamports > max) return socket.emit("dice:error", { code: "BET_RANGE", message: "Bet outside allowed range" });
-        if (!(target >= 2 && target <= 98)) return socket.emit("dice:error", { code: "BAD_TARGET", message: "Target must be 2..98" });
+        if (betLamports < min || betLamports > max)
+          return socket.emit("dice:error", { code: "BET_RANGE", message: "Bet outside allowed range" });
+        if (!(target >= 2 && target <= 98))
+          return socket.emit("dice:error", { code: "BAD_TARGET", message: "Target must be 2..98" });
 
-        const userVault = deriveUserVaultPda(playerPk);
-        const houseVault = deriveVaultPda();
+        const useFake = await Promo.isFakeMode(player);
         const nonce = Date.now();
         const expiryUnix = Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
+
+        // Provably-fair commitment (always, both modes)
+        const serverSeedBuf = crypto.randomBytes(32);
+        const serverSeedHex = serverSeedBuf.toString("hex");
+        const serverSeedHash = crypto.createHash("sha256").update(serverSeedBuf).digest("hex");
+
+        await precheckOrThrow({ userWallet: player, stakeLamports: betLamports, gameKey: "dice" });
+
+        if (useFake) {
+          // Freeze promo balance and record lock
+          const newBal = await Promo.freezeForBet(player, betLamports);
+          await dbRecordDiceLock({
+            player,
+            amountLamports: String(betLamports),
+            betType: betTypeNum,
+            target,
+            nonce,
+            expiry: expiryUnix,
+            signature_base58: `FAKE-LOCK-${nonce}`,
+            serverSeedHash,
+            clientSeed: String(clientSeed || ""),
+          });
+          // Keep pending context in-memory
+          dicePending.set(nonce, {
+            player,
+            betLamports,
+            betTypeNum,
+            target,
+            clientSeed: String(clientSeed || ""),
+            serverSeedHex,
+            serverSeedHash,
+          });
+          return socket.emit("dice:locked", {
+            nonce: String(nonce),
+            txSig: `FAKE-LOCK-${nonce}`,
+            serverSeedHash,
+            promoBalanceLamports: newBal,
+          });
+        }
+
+        // === REAL (on-chain) path ===
+        const playerPk = new PublicKey(player);
+        const userVault = deriveUserVaultPda(playerPk);
+        const houseVault = deriveVaultPda();
+
         const pendingBet = derivePendingBetPda(playerPk, nonce);
 
-        // ed25519 presence
-        const msg = buildMessageBytes({
+        const msgBytes = buildMessageBytes({
           programId: PROGRAM_ID.toBuffer(),
           vault: houseVault.toBuffer(),
           player: playerPk.toBuffer(),
@@ -551,19 +544,13 @@ function attachDice(io) {
           nonce: Number(nonce),
           expiryUnix: Number(expiryUnix),
         });
-        const edSig = await signMessageEd25519(msg);
-        const edIx = buildEd25519VerifyIx({ message: msg, signature: edSig, publicKey: ADMIN_PK });
+        const edSig = await signMessageEd25519(msgBytes);
+        const edIx  = buildEd25519VerifyIx({ message: msgBytes, signature: edSig, publicKey: ADMIN_PK });
         const edIndex = 1;
 
         const feePayer = await getServerKeypair();
         const cuPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
         const cuLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 350_000 });
-
-        await precheckOrThrow({
-          userWallet: player,
-          stakeLamports: betLamports,
-          gameKey: "dice",
-        });
 
         const lockIx = ixPlaceBetFromVault({
           programId: PROGRAM_ID,
@@ -589,21 +576,29 @@ function attachDice(io) {
 
         const vtx = new VersionedTransaction(msgV0);
         const sim = await connection.simulateTransaction(vtx, { sigVerify: false });
-        if (sim.value.err) throw new Error(`Dice lock simulate failed: ${JSON.stringify(sim.value.err)}\n${(sim.value.logs || []).join("\n")}`);
+        if (sim.value.err)
+          throw new Error(`Dice lock simulate failed: ${JSON.stringify(sim.value.err)}\n${(sim.value.logs || []).join("\n")}`);
 
         vtx.sign([feePayer]);
         const sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
         await connection.confirmTransaction(sig, "confirmed");
 
-        // ====== PROVABLY-FAIR: create serverSeed and serverSeedHash and store in memory pending map ======
-        const serverSeedBuf = crypto.randomBytes(32);
-        const serverSeedHex = serverSeedBuf.toString("hex");
-        const serverSeedHash = crypto.createHash("sha256").update(serverSeedBuf).digest("hex");
+        // persist commitment
+        await dbRecordDiceLock({
+          player: playerPk.toBase58(),
+          amountLamports: String(betLamports),
+          betType: betTypeNum,
+          target,
+          nonce,
+          expiry: expiryUnix,
+          signature_base58: sig,
+          serverSeedHash,
+          clientSeed: String(clientSeed || ""),
+        }).catch(() => {});
 
-        // store everything required to resolve deterministically later
         dicePending.set(nonce, {
           player,
-          betLamports: betLamports,
+          betLamports,
           betTypeNum,
           target,
           clientSeed: String(clientSeed || ""),
@@ -611,65 +606,66 @@ function attachDice(io) {
           serverSeedHash,
         });
 
-        // record bet in DB (status prepared_lock). we don't persist serverSeed to DB here (no schema change).
-        await DB.recordBet?.({
-          player: playerPk.toBase58(),
-          amount: String(betLamports),
-          betType: betTypeNum,
-          target,
-          roll: 0,
-          payout: 0,
-          nonce,
-          expiry: expiryUnix,
-          signature_base58: sig,
-        }).catch(() => {});
-
-        // emit locked with serverSeedHash (commitment) so clients can see hash BEFORE seed reveal
         socket.emit("dice:locked", { nonce: String(nonce), txSig: sig, serverSeedHash });
-
       } catch (e) {
         socket.emit("dice:error", { code: "PLACE_FAIL", message: String(e.message || e) });
       }
     });
 
-    // ---- Dice resolve (uses HMAC with serverSeed + clientSeed + nonce) ----
+    // ---- Dice: resolve ----
     socket.on("dice:resolve", async ({ player, nonce }) => {
       try {
         if (!player) return socket.emit("dice:error", { code: "NO_PLAYER", message: "player required" });
-        if (!nonce) return socket.emit("dice:error", { code: "NO_NONCE", message: "nonce required" });
+        if (!nonce)  return socket.emit("dice:error", { code: "NO_NONCE",  message: "nonce required" });
 
-        const playerPk = new PublicKey(player);
+        const useFake = await Promo.isFakeMode(player);
         let ctx = dicePending.get(Number(nonce));
-        if (!ctx && typeof DB.getBetByNonce === "function") {
-          const row = await DB.getBetByNonce(Number(nonce)).catch(() => null);
+
+        if (!ctx) {
+          const row = await dbGetBetByNonce(Number(nonce)).catch(() => null);
           if (row) {
-            // fallback: we can still compute from DB row if clientSeed/serverSeed were persisted earlier — but they are not currently.
-            ctx = { player, betLamports: BigInt(row.bet_amount_lamports), betTypeNum: Number(row.bet_type), target: Number(row.target), clientSeed: "" };
+            ctx = {
+              player,
+              betLamports: BigInt(row.bet_amount_lamports),
+              betTypeNum: Number(row.bet_type),
+              target: Number(row.target),
+              clientSeed: String(row.client_seed || ""),
+              serverSeedHex: String(row.server_seed_hex || ""),
+              serverSeedHash: String(row.server_seed_hash || ""),
+            };
           }
         }
         if (!ctx) return socket.emit("dice:error", { code: "NOT_FOUND", message: "no prepared dice bet for nonce" });
 
-        let rtp_bps = 9900;
-        try { const rules = await DB.getRules?.(); if (rules?.rtp_bps) rtp_bps = Number(rules.rtp_bps); } catch {}
+        // House edge / RTP
+        let rtp_bps = 9900, fee_bps = 100;
+        try {
+          const rules = await DB.getRules?.();
+          if (rules?.rtp_bps != null) rtp_bps = Number(rules.rtp_bps);
+          if (rules?.house_edge_bps != null) fee_bps = Number(rules.house_edge_bps);
+          if (DB.getGameConfig) {
+            const cfg = await DB.getGameConfig("dice");
+            if (cfg?.rtp_bps != null) rtp_bps = Number(cfg.rtp_bps);
+            if (cfg?.fee_bps != null) fee_bps = Number(cfg.fee_bps);
+            else fee_bps = Math.max(0, 10000 - rtp_bps);
+          } else {
+            fee_bps = Math.max(0, 10000 - rtp_bps);
+          }
+        } catch {}
 
-        // ===== derive roll deterministically using HMAC(serverSeed, clientSeed + nonce) =====
-        // If ctx.serverSeedHex exists (from in-memory), use it; otherwise fallback to non-HMAC RNG (legacy)
+        // Deterministic roll
         let roll, hmacHex;
         if (ctx.serverSeedHex) {
-          const out = deriveDiceRoll({ serverSeedHex: ctx.serverSeedHex, clientSeed: ctx.clientSeed, nonce: Number(nonce) });
+          const out = deriveDiceRoll({
+            serverSeedHex: ctx.serverSeedHex,
+            clientSeed: ctx.clientSeed,
+            nonce: Number(nonce),
+          });
           roll = out.roll;
           hmacHex = out.hmacHex;
         } else {
-          // Legacy fallback (should be rare); uses RNG module if present
-          // (This path won't be provably-fair)
-          try {
-            const { roll1to100 } = require("./rng");
-            roll = roll1to100();
-            hmacHex = null;
-          } catch {
-            roll = Math.floor(Math.random() * 100) + 1;
-            hmacHex = null;
-          }
+          roll = Math.floor(Math.random() * 100) + 1;
+          hmacHex = null;
         }
 
         const win_odds = ctx.betTypeNum === 0 ? ctx.target - 1 : 100 - ctx.target;
@@ -679,11 +675,79 @@ function attachDice(io) {
           ? Number(computePayoutLamports({ betLamports: ctx.betLamports, rtp_bps, win_odds }))
           : 0;
 
+        if (useFake) {
+          // Persist reveal, round, activity
+          await dbUpsertDiceResolve({
+            player,
+            betLamports: Number(ctx.betLamports),
+            betTypeNum: Number(ctx.betTypeNum),
+            target: Number(ctx.target),
+            nonce: Number(nonce),
+            roll: Number(roll),
+            payoutLamports: Number(payoutLamports),
+            resolvedSig: `FAKE-RESOLVE-${nonce}`,
+            serverSeedHex: ctx.serverSeedHex || null,
+            hmacHex: hmacHex || null,
+            clientSeed: ctx.clientSeed || "",
+            win,
+            rtp_bps,
+            fee_bps,
+          }).catch(() => {});
+
+          await DB.recordGameRound?.({
+            game_key: "dice",
+            player,
+            nonce: Number(nonce),
+            stake_lamports: Number(ctx.betLamports),
+            payout_lamports: Number(payoutLamports),
+            result_json: {
+              roll,
+              betType: ctx.betTypeNum === 0 ? "under" : "over",
+              target: ctx.target,
+              win,
+              hmacHex: hmacHex || null,
+            },
+          }).catch(() => {});
+          if (payoutLamports > 0) {
+            await DB.recordActivity?.({
+              user: player,
+              action: "Dice win",
+              amount: (Number(payoutLamports) / 1e9).toFixed(4),
+            }).catch(() => {});
+          }
+
+          // Credit payout back to promo
+          await Promo.settleBet(player, payoutLamports);
+
+          socket.emit("dice:resolved", {
+            nonce: String(nonce),
+            roll,
+            win,
+            payoutLamports: Number(payoutLamports),
+            txSig: `FAKE-RESOLVE-${nonce}`,
+          });
+
+          if (ctx.serverSeedHex) {
+            socket.emit("dice:reveal_seed", {
+              nonce: String(nonce),
+              serverSeedHex: ctx.serverSeedHex,
+              clientSeed: ctx.clientSeed,
+              formula: "HMAC_SHA256(serverSeed, clientSeed + nonce)",
+              hmacHex: hmacHex || null,
+            });
+          }
+
+          dicePending.delete(Number(nonce));
+          return;
+        }
+
+        // === REAL (on-chain) resolve ===
+        const playerPk = new PublicKey(player);
         const houseVault = deriveVaultPda();
         const adminPda   = deriveAdminPda();
         const userVault  = deriveUserVaultPda(playerPk);
-
         const expiryUnix = Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
+
         const msg = buildMessageBytes({
           programId: PROGRAM_ID.toBuffer(),
           vault: houseVault.toBuffer(),
@@ -726,35 +790,60 @@ function attachDice(io) {
 
         const vtx = new VersionedTransaction(msgV0);
         const sim = await connection.simulateTransaction(vtx, { sigVerify: false });
-        if (sim.value.err) throw new Error(`Dice resolve simulate failed: ${JSON.stringify(sim.value.err)}\n${(sim.value.logs || []).join("\n")}`);
+        if (sim.value.err)
+          throw new Error(`Dice resolve simulate failed: ${JSON.stringify(sim.value.err)}\n${(sim.value.logs || []).join("\n")}`);
 
         vtx.sign([feePayer]);
         const sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
         await connection.confirmTransaction(sig, "confirmed");
 
-        // record game round & activity
+        await dbUpsertDiceResolve({
+          player,
+          betLamports: Number(ctx.betLamports),
+          betTypeNum: Number(ctx.betTypeNum),
+          target: Number(ctx.target),
+          nonce: Number(nonce),
+          roll: Number(roll),
+          payoutLamports: Number(payoutLamports),
+          resolvedSig: sig,
+          serverSeedHex: ctx.serverSeedHex || null,
+          hmacHex: hmacHex || null,
+          clientSeed: ctx.clientSeed || "",
+          win,
+          rtp_bps,
+          fee_bps,
+        }).catch(() => {});
+
         await DB.recordGameRound?.({
           game_key: "dice",
           player,
           nonce: Number(nonce),
           stake_lamports: Number(ctx.betLamports),
           payout_lamports: Number(payoutLamports),
-          result_json: { roll, betType: ctx.betTypeNum === 0 ? "under" : "over", target: ctx.target, win, hmacHex: hmacHex || null },
+          result_json: {
+            roll,
+            betType: ctx.betTypeNum === 0 ? "under" : "over",
+            target: ctx.target,
+            win,
+            hmacHex: hmacHex || null,
+          },
         }).catch(() => {});
         if (payoutLamports > 0) {
-          await DB.recordActivity?.({ user: player, action: "Dice win", amount: (Number(payoutLamports) / 1e9).toFixed(4) }).catch(() => {});
+          await DB.recordActivity?.({
+            user: player,
+            action: "Dice win",
+            amount: (Number(payoutLamports) / 1e9).toFixed(4),
+          }).catch(() => {});
         }
 
-        if (typeof DB.updateBetPrepared === "function") {
-          // Update roll/payout in bets table if present
-          await DB.updateBetPrepared({ nonce: Number(nonce), roll, payout: Number(payoutLamports) }).catch(() => {});
-        }
+        socket.emit("dice:resolved", {
+          nonce: String(nonce),
+          roll,
+          win,
+          payoutLamports: Number(payoutLamports),
+          txSig: sig,
+        });
 
-        // emit resolved result
-        socket.emit("dice:resolved", { nonce: String(nonce), roll, win, payoutLamports: Number(payoutLamports), txSig: sig });
-
-        // ==== REVEAL seed for provable fairness (emit only AFTER resolve) ====
-        // If we have an in-memory serverSeed, reveal it for client-side verification.
         if (ctx.serverSeedHex) {
           socket.emit("dice:reveal_seed", {
             nonce: String(nonce),
@@ -763,11 +852,8 @@ function attachDice(io) {
             formula: "HMAC_SHA256(serverSeed, clientSeed + nonce)",
             hmacHex: hmacHex || null,
           });
-        } else {
-          // no serverSeed available (legacy) - do not emit
         }
 
-        // cleanup
         dicePending.delete(Number(nonce));
       } catch (e) {
         socket.emit("dice:error", { code: "RESOLVE_FAIL", message: String(e.message || e) });
@@ -776,4 +862,8 @@ function attachDice(io) {
   });
 }
 
-module.exports = { attachDice };
+module.exports = {
+  ensureDiceSchema,
+  attachDiceRoutes,
+  attachDice,
+};

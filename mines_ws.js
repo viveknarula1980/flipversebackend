@@ -1,330 +1,15 @@
 // backend/mines_ws.js
-// Server-driven Mines. Server pays winners, then resolve(payout=0) to close PDA.
+// WS + HTTP for Mines with DB schema auto-detection (works with legacy tables).
+//
+// Adds HTTP routes:
+//   GET /mines/ping
+//   GET /mines/resolved?wallet=<base58>&limit=10&cursor=<id>
+//
+// If you only mounted the WS before, also mount HTTP in server.js:
+//   const mines = require("./mines_ws");
+//   mines.attachMines(io);
+//   mines.attachMinesRoutes(app);
 
-// const crypto = require("crypto");
-// const {
-//   Connection,
-//   PublicKey,
-//   VersionedTransaction,
-//   TransactionMessage,
-//   SystemProgram,
-//   ComputeBudgetProgram,
-//   Ed25519Program,
-// } = require("@solana/web3.js");
-
-// const { ADMIN_PK, signMessageEd25519, getServerKeypair } = require("./signer");
-// const DB = global.db || require("./db");
-
-// // ---- ENV / RPC / Program ----
-// const RPC_URL = process.env.CLUSTER || "https://api.devnet.solana.com";
-// const connection = new Connection(RPC_URL, "confirmed");
-
-// if (!process.env.MINES_PROGRAM_ID) throw new Error("MINES_PROGRAM_ID missing in .env");
-// const PROGRAM_ID = new PublicKey(process.env.MINES_PROGRAM_ID);
-
-// const SYSVAR_INSTR = new PublicKey("Sysvar1nstructions1111111111111111111111111");
-
-// const ADMIN_PUBKEY = new PublicKey(ADMIN_PK);
-
-// // PDAs & utils
-// function pdaVault() { return PublicKey.findProgramAddressSync([Buffer.from("vault")], PROGRAM_ID)[0]; }
-// function pdaPending(playerPk, nonce) {
-//   const nb = Buffer.alloc(8);
-//   nb.writeBigUInt64LE(BigInt(nonce));
-//   return PublicKey.findProgramAddressSync([Buffer.from("round"), playerPk.toBuffer(), nb], PROGRAM_ID)[0];
-// }
-// function anchorDisc(name) { return crypto.createHash("sha256").update(`global:${name}`).digest().slice(0, 8); }
-// function encLock({ betLamports, rows, cols, mines, nonce, expiryUnix }) {
-//   const d = anchorDisc("lock");
-//   const b = Buffer.alloc(8 + 8 + 1 + 1 + 1 + 8 + 8);
-//   let o = 0;
-//   d.copy(b, o); o += 8;
-//   b.writeBigUInt64LE(BigInt(betLamports), o); o += 8;
-//   b.writeUInt8(rows & 0xff, o++); b.writeUInt8(cols & 0xff, o++); b.writeUInt8(mines & 0xff, o++);
-//   b.writeBigUInt64LE(BigInt(nonce), o); o += 8;
-//   b.writeBigInt64LE(BigInt(expiryUnix), o); o += 8;
-//   return b;
-// }
-// function encResolve({ checksum, payout, edIndex }) {
-//   const d = anchorDisc("resolve");
-//   const b = Buffer.alloc(8 + 1 + 8 + 1);
-//   let o = 0;
-//   d.copy(b, o); o += 8;
-//   b.writeUInt8(checksum & 0xff, o++); b.writeBigUInt64LE(BigInt(payout), o); o += 8; b.writeUInt8(edIndex & 0xff, o++);
-//   return b;
-// }
-// function keysLock({ player, vault, pending }) {
-//   return [
-//     { pubkey: player, isSigner: true, isWritable: true },
-//     { pubkey: vault, isSigner: false, isWritable: true },
-//     { pubkey: pending, isSigner: false, isWritable: true },
-//     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-//   ];
-// }
-// function keysResolve({ player, vault, admin, pending }) {
-//   return [
-//     { pubkey: player, isSigner: false, isWritable: true },
-//     { pubkey: vault, isSigner: false, isWritable: true },
-//     { pubkey: admin, isSigner: false, isWritable: false },
-//     { pubkey: pending, isSigner: false, isWritable: true },
-//     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-//     { pubkey: SYSVAR_INSTR, isSigner: false, isWritable: false },
-//   ];
-// }
-
-// // math
-// function multiplierFor(safeOpened, totalTiles, mines, rtpBps = 10000) {
-//   if (safeOpened <= 0) return 1;
-//   let m = 1;
-//   for (let i = 0; i < safeOpened; i++) {
-//     const totalLeft = totalTiles - i;
-//     const safeLeft = (totalTiles - mines) - i;
-//     m *= totalLeft / safeLeft;
-//   }
-//   m *= (rtpBps / 10000);
-//   return Math.max(1, m);
-// }
-
-// function deriveBombs({ rows, cols, mines, playerPk, nonce, firstSafeIndex }) {
-//   const total = rows * cols;
-//   const seedKey = crypto.createHash("sha256")
-//     .update(playerPk.toBuffer())
-//     .update(Buffer.from(String(nonce)))
-//     .digest();
-//   const picked = new Set();
-//   let i = 0;
-//   while (picked.size < mines) {
-//     const rng = crypto.createHmac("sha256", seedKey).update(Buffer.from(String(i++))).digest();
-//     const n = ((rng[0] << 24) | (rng[1] << 16) | (rng[2] << 8) | rng[3]) >>> 0;
-//     const idx = n % total;
-//     if (idx === firstSafeIndex) continue;
-//     picked.add(idx);
-//   }
-//   return picked;
-// }
-
-// // store
-// const rounds = new Map();
-
-// async function buildLockTx({ playerPk, betLamports, rows, cols, mines, nonce, expiryUnix }) {
-//   const vault = pdaVault();
-//   const pending = pdaPending(playerPk, nonce);
-//   const ix = { programId: PROGRAM_ID, keys: keysLock({ player: playerPk, vault, pending }), data: encLock({ betLamports, rows, cols, mines, nonce, expiryUnix }) };
-//   const cu = ComputeBudgetProgram.setComputeUnitLimit({ units: 300_000 });
-//   const { blockhash } = await connection.getLatestBlockhash("confirmed");
-//   const msg = new TransactionMessage({ payerKey: playerPk, recentBlockhash: blockhash, instructions: [cu, ix] }).compileToV0Message();
-//   const vtx = new VersionedTransaction(msg);
-
-//   const sim = await connection.simulateTransaction(vtx, { sigVerify: false });
-//   if (sim.value.err) {
-//     const logs = (sim.value.logs || []).join("\n");
-//     const e = JSON.stringify(sim.value.err);
-//     const abiErr = logs.includes("InstructionFallbackNotFound") || logs.includes("Fallback functions are not supported");
-//     if (abiErr) throw new Error(`LOCK discriminator mismatch: ${logs}`);
-//     const fundsErr = logs.includes("Transfer: insufficient lamports") || e.includes('"Custom":1');
-//     if (!fundsErr) throw new Error(`LOCK simulate failed: ${e}\n${logs}`);
-//   }
-//   return Buffer.from(vtx.serialize()).toString("base64");
-// }
-
-// async function sendResolve({ playerPk, nonce, payoutLamports }) {
-//   const vault = pdaVault();
-//   const pending = pdaPending(playerPk, nonce);
-//   const admin = ADMIN_PUBKEY;
-//   const feePayer = await getServerKeypair();
-
-//   if (BigInt(payoutLamports) > 0n) {
-//     try {
-//       const transferIx = SystemProgram.transfer({ fromPubkey: feePayer.publicKey, toPubkey: playerPk, lamports: BigInt(payoutLamports) });
-//       const { blockhash: bh1 } = await connection.getLatestBlockhash("confirmed");
-//       const transferMsg = new TransactionMessage({ payerKey: feePayer.publicKey, recentBlockhash: bh1, instructions: [transferIx] }).compileToV0Message();
-//       const transferVtx = new VersionedTransaction(transferMsg);
-//       transferVtx.sign([feePayer]);
-//       const transferSig = await connection.sendRawTransaction(transferVtx.serialize(), { skipPreflight: false });
-//       await connection.confirmTransaction(transferSig, "confirmed");
-//     } catch (e) {
-//       throw new Error("Server payout transfer failed: " + (e?.message || String(e)));
-//     }
-//   }
-
-//   const msg = Buffer.concat([ Buffer.from("MINES_V1"), PROGRAM_ID.toBuffer(), vault.toBuffer(), playerPk.toBuffer(), Buffer.from(String(nonce)) ]);
-//   const edSig = await signMessageEd25519(msg);
-//   const edIx = Ed25519Program.createInstructionWithPublicKey({ publicKey: admin.toBuffer(), message: msg, signature: edSig });
-//   const edIndex = 1;
-
-//   const checksum = ((Number(nonce) % 251) + 1) & 0xff;
-//   const data = encResolve({ checksum, payout: 0n, edIndex });
-//   const ix = { programId: PROGRAM_ID, keys: keysResolve({ player: playerPk, vault, admin, pending }), data };
-
-//   const cu = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
-//   const { blockhash } = await connection.getLatestBlockhash("confirmed");
-//   const msgV0 = new TransactionMessage({ payerKey: feePayer.publicKey, recentBlockhash: blockhash, instructions: [cu, edIx, ix] }).compileToV0Message();
-//   const vtx = new VersionedTransaction(msgV0);
-
-//   const sim = await connection.simulateTransaction(vtx, { sigVerify: false });
-//   if (sim.value.err) {
-//     const logs = (sim.value.logs || []).join("\n");
-//     throw new Error(`RESOLVE simulate failed: ${JSON.stringify(sim.value.err)}\n${logs}`);
-//   }
-//   vtx.sign([feePayer]);
-//   const sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
-//   await connection.confirmTransaction(sig, "confirmed");
-//   return sig;
-// }
-
-// function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
-// function i32(x) { const n = Number(x); return Number.isFinite(n) ? (n | 0) : 0; }
-
-// function attachMines(io) {
-//   io.on("connection", (socket) => {
-//     socket.on("register", ({ player }) => { socket.data.player = String(player || "guest"); });
-
-//     socket.on("mines:prepare_lock", async (p) => {
-//       try {
-//         const player = String(p?.player || "");
-//         if (!player) return socket.emit("mines:error", { code: "NO_PLAYER", message: "player required" });
-
-//         // admin gate + min/max
-//         const cfg = await DB.getGameConfig?.("mines");
-//         if (cfg && (!cfg.enabled || !cfg.running)) {
-//           return socket.emit("mines:error", { code: "DISABLED", message: "Mines disabled by admin" });
-//         }
-//         const min = BigInt(cfg?.min_bet_lamports ?? 50000);
-//         const max = BigInt(cfg?.max_bet_lamports ?? 5_000_000_000n);
-
-//         const betLamports = BigInt(p?.betAmountLamports || 0);
-//         if (!(betLamports > 0n)) return socket.emit("mines:error", { code:"BAD_BET", message:"betAmountLamports must be > 0" });
-//         if (betLamports < min || betLamports > max) {
-//           return socket.emit("mines:error", { code: "BET_RANGE", message: "Bet outside allowed range" });
-//         }
-
-//         const rows = clamp(i32(p?.rows), 2, 8);
-//         const cols = clamp(i32(p?.cols), 2, 8);
-//         const mines = clamp(i32(p?.minesCount), 1, rows * cols - 1);
-
-//         const playerPk = new PublicKey(player);
-//         const nonce = Date.now();
-//         const expiryUnix = Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
-
-//         const txB64 = await buildLockTx({ playerPk, betLamports: Number(betLamports), rows, cols, mines, nonce, expiryUnix });
-
-//         let rtp_bps = cfg?.rtp_bps ?? 9800;
-//         rounds.set(nonce, { playerPk, betLamports: BigInt(betLamports), rows, cols, mines, opened: new Set(), bombs: null, rtpBps: rtp_bps, over: false });
-
-//         socket.emit("mines:lock_tx", { nonce: String(nonce), expiryUnix, transactionBase64: txB64 });
-//       } catch (e) {
-//         console.error("mines:prepare_lock error:", e);
-//         socket.emit("mines:error", { code: "PREPARE_FAIL", message: e.message || String(e) });
-//       }
-//     });
-
-//     socket.on("mines:lock_confirmed", ({ nonce }) => {
-//       const ctx = rounds.get(Number(nonce));
-//       if (!ctx) return socket.emit("mines:error", { code: "NOT_FOUND", message: "no round" });
-//       socket.emit("mines:started", { nonce: String(nonce), rows: ctx.rows, cols: ctx.cols, mines: ctx.mines });
-//     });
-
-//     socket.on("mines:open", async ({ nonce, row, col }) => {
-//       try {
-//         const ctx = rounds.get(Number(nonce));
-//         if (!ctx) return socket.emit("mines:error", { code: "NOT_FOUND", message: "no round" });
-//         if (ctx.over) return;
-
-//         const r = i32(row), c = i32(col);
-//         if (r < 0 || c < 0 || r >= ctx.rows || c >= ctx.cols)
-//           return socket.emit("mines:error", { code: "BAD_COORD", message: "row/col out of range" });
-
-//         const idx = r * ctx.cols + c;
-//         if (ctx.opened.has(idx)) return;
-
-//         if (!ctx.bombs) {
-//           ctx.bombs = deriveBombs({ rows: ctx.rows, cols: ctx.cols, mines: ctx.mines, playerPk: ctx.playerPk, nonce: Number(nonce), firstSafeIndex: idx });
-//         }
-
-//         if (ctx.bombs.has(idx)) {
-//           ctx.over = true;
-//           socket.emit("mines:boom", { nonce: String(nonce), atIndex: idx, atStep: ctx.opened.size });
-//           const sig = await sendResolve({ playerPk: ctx.playerPk, nonce: Number(nonce), payoutLamports: 0n });
-
-//           // persist loss
-//           try {
-//             await DB.recordGameRound?.({
-//               game_key: "mines",
-//               player: ctx.playerPk.toBase58(),
-//               nonce: Number(nonce),
-//               stake_lamports: Number(ctx.betLamports),
-//               payout_lamports: 0,
-//               result_json: { rows: ctx.rows, cols: ctx.cols, mines: ctx.mines, opened: [...ctx.opened], boomAt: idx },
-//             });
-//           } catch {}
-
-//           const payload = { nonce: String(nonce), payoutLamports: 0, safeSteps: ctx.opened.size, tx: sig };
-//           io.emit("mines:resolved", payload);
-//           rounds.delete(Number(nonce));
-//           return;
-//         }
-
-//         ctx.opened.add(idx);
-//         const totalTiles = ctx.rows * ctx.cols;
-//         const mult = multiplierFor(ctx.opened.size, totalTiles, ctx.mines, ctx.rtpBps);
-//         socket.emit("mines:safe", { nonce: String(nonce), index: idx, safeCount: ctx.opened.size, multiplier: mult });
-//       } catch (e) {
-//         console.error("mines:open error:", e);
-//         socket.emit("mines:error", { code: "OPEN_FAIL", message: e.message || String(e) });
-//       }
-//     });
-
-//     socket.on("mines:cashout", async ({ nonce }) => {
-//       try {
-//         const ctx = rounds.get(Number(nonce));
-//         if (!ctx) return socket.emit("mines:error", { code: "NOT_FOUND", message: "no round" });
-//         if (ctx.over) return;
-//         if (ctx.opened.size < 1) {
-//           return socket.emit("mines:error", { code: "TOO_SOON", message: "Open at least 1 tile before cashout" });
-//         }
-
-//         const totalTiles = ctx.rows * ctx.cols;
-//         const mult = multiplierFor(ctx.opened.size, totalTiles, ctx.mines, ctx.rtpBps);
-//         const payout = (ctx.betLamports * BigInt(Math.floor(mult * 10000))) / 10000n;
-
-//         ctx.over = true;
-//         const sig = await sendResolve({ playerPk: ctx.playerPk, nonce: Number(nonce), payoutLamports: payout });
-
-//         // persist win + activity
-//         try {
-//           await DB.recordGameRound?.({
-//             game_key: "mines",
-//             player: ctx.playerPk.toBase58(),
-//             nonce: Number(nonce),
-//             stake_lamports: Number(ctx.betLamports),
-//             payout_lamports: Number(payout),
-//             result_json: { rows: ctx.rows, cols: ctx.cols, mines: ctx.mines, opened: [...ctx.opened] },
-//           });
-//           await DB.recordActivity?.({
-//             user: ctx.playerPk.toBase58(),
-//             action: "Mines cashout",
-//             amount: (Number(payout)/1e9).toFixed(4),
-//           });
-//         } catch {}
-
-//         io.emit("mines:resolved", { nonce: String(nonce), payoutLamports: Number(payout), safeSteps: ctx.opened.size, tx: sig });
-//         rounds.delete(Number(nonce));
-//       } catch (e) {
-//         console.error("mines:cashout error:", e);
-//         socket.emit("mines:error", { code: "CASHOUT_FAIL", message: e.message || String(e) });
-//       }
-//     });
-//   });
-// }
-
-// module.exports = { attachMines };
-
-
-
-
-// backend/mines_ws.js
-// Server drives the game. Lock moves user_vault → house_vault. Resolve pays house_vault → user_vault.
-// backend/mines_ws.js
 const crypto = require("crypto");
 const {
   PublicKey,
@@ -333,37 +18,47 @@ const {
   ComputeBudgetProgram,
 } = require("@solana/web3.js");
 
+const DB = global.db || require("./db");
+
+// ---------- optional bonus guard ----------
+let precheckOrThrow = async () => {};
+try { ({ precheckOrThrow } = require("./bonus_guard")); } catch (_) {}
+
+// ---------- promo balance helpers ----------
+const Promo = require("./promo_balance");
+
+// ---------- solana helpers ----------
+const baseSolana = require("./solana");
 const {
   connection,
   PROGRAM_ID,
   deriveVaultPda,
   deriveAdminPda,
   deriveUserVaultPda,
-  derivePendingRoundPda,
   buildEd25519VerifyIx,
-} = require("./solana");
+} = baseSolana;
 
-const {
-  ixMinesLock,
-  ixMinesResolve,
-} = require("./solana_anchor_ix");
+const derivePending =
+  typeof baseSolana.derivePendingMinesPda === "function"
+    ? baseSolana.derivePendingMinesPda
+    : baseSolana.derivePendingRoundPda;
 
+const { ixMinesLock, ixMinesResolve } = require("./solana_anchor_ix");
 const { signMessageEd25519, ADMIN_PK, getServerKeypair } = require("./signer");
-const DB = global.db || require("./db");
-const { precheckOrThrow } = require("./bonus_guard");
 
-// ----- helpers -----
+// ---------- small helpers ----------
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function i32(x) { const n = Number(x); return Number.isFinite(n) ? (n | 0) : 0; }
-function minesChecksum(nonce) { return Number((BigInt(nonce) % 251n) + 1n) & 0xff; }
 function sha256Hex(buf) { return crypto.createHash("sha256").update(buf).digest("hex"); }
+function minesChecksum(nonce) { return Number((BigInt(nonce) % 251n) + 1n) & 0xff; }
 
-// ----- provable bombs derivation -----
-// serverSeed: Buffer (32 bytes) - HMAC key
+// ---------- provably fair bombs ----------
 function deriveBombs({ rows, cols, mines, playerPk, nonce, firstSafeIndex, serverSeed, clientSeed }) {
   const total = rows * cols;
   if (!serverSeed) throw new Error("serverSeed required for deriveBombs");
-  const seedKey = crypto.createHmac("sha256", serverSeed)
+
+  const seedKey = crypto
+    .createHmac("sha256", serverSeed)
     .update(playerPk.toBuffer())
     .update(Buffer.from(String(nonce)))
     .update(Buffer.from(String(clientSeed || "")))
@@ -381,7 +76,6 @@ function deriveBombs({ rows, cols, mines, playerPk, nonce, firstSafeIndex, serve
   return picked;
 }
 
-// multiplier formula
 function multiplierFor(safeOpened, totalTiles, mines, rtpBps = 10000) {
   if (safeOpened <= 0) return 1;
   let m = 1;
@@ -394,146 +88,345 @@ function multiplierFor(safeOpened, totalTiles, mines, rtpBps = 10000) {
   return Math.max(1, m);
 }
 
-// in-memory rounds
+// ---------- in-memory rounds ----------
 const rounds = new Map();
 
+// ---------- schema detection ----------
+const COLS = { set: null };
+
+async function ensureCols() {
+  if (COLS.set) return COLS.set;
+  try {
+    if (!DB?.pool?.query) {
+      COLS.set = new Set();
+      return COLS.set;
+    }
+    const r = await DB.pool.query(
+      `select column_name from information_schema.columns
+       where table_schema='public' and table_name='mines_rounds'`
+    );
+    COLS.set = new Set(r.rows.map((x) => x.column_name));
+    console.log("[mines] detected columns:", [...COLS.set].join(", "));
+  } catch (e) {
+    console.warn("[mines] schema detection failed:", e?.message || e);
+    COLS.set = new Set();
+  }
+  return COLS.set;
+}
+function hasCol(name) { return COLS.set && COLS.set.has(name); }
+function pickFirst(...names) {
+  for (const n of names) if (hasCol(n)) return n;
+  return null;
+}
+
+// ---------- DB helpers (dynamic SQL) ----------
+async function dbInsertLockedRow(ctx, txSig, mode) {
+  try {
+    if (!DB?.pool?.query) return;
+    await ensureCols();
+
+    const cols = [];
+    const vals = [];
+    const params = [];
+    let i = 1;
+
+    const push = (name, value) => { cols.push(name); params.push(value); vals.push(`$${i++}`); };
+
+    push("player", ctx.playerPk.toBase58());
+    push("nonce", BigInt(ctx.nonce));
+    push("bet_lamports", Number(ctx.betLamports));
+    push("rows", ctx.rows);
+    push("cols", ctx.cols);
+    push("mines", ctx.mines);
+    if (hasCol("server_seed_hash")) push("server_seed_hash", ctx.serverSeedHash);
+    if (hasCol("server_seed")) push("server_seed", ctx.serverSeed?.toString("hex") || null);
+    if (hasCol("client_seed")) push("client_seed", ctx.clientSeed || "");
+    if (hasCol("first_hmac_hex")) push("first_hmac_hex", ctx.firstHmacHex || null);
+    if (hasCol("rtp_bps")) push("rtp_bps", Number(ctx.rtpBps || 10000));
+    if (hasCol("status")) push("status", "locked");
+    const lockCol = pickFirst("lock_sig", "lock_tx_sig");
+    if (lockCol) push(lockCol, txSig || null);
+    if (hasCol("expiry_unix")) push("expiry_unix", Number(ctx.expiryUnix));
+    if (hasCol("mode")) push("mode", mode);
+    const pendingCol = pickFirst("pending_round", "pending_mines_round");
+    if (pendingCol) push(pendingCol, ctx.pending || null);
+
+    const sql =
+      `insert into mines_rounds(${cols.join(",")}) values (${vals.join(",")})
+       on conflict (nonce) do nothing`;
+    await DB.pool.query(sql, params);
+  } catch (e) {
+    console.warn("[mines] insert locked warn:", e?.message || e);
+  }
+}
+
+async function dbUpdateOpened(nonce, openedSet, firstSafeIndex) {
+  try {
+    if (!DB?.pool?.query) return;
+    await ensureCols();
+
+    if (!hasCol("opened_json")) return; // nothing to persist
+    const cols = ["opened_json"];
+    const vals = ["$2"];
+    const params = [BigInt(nonce), JSON.stringify(Array.from(openedSet).sort((a, b) => a - b))];
+    if (hasCol("first_safe_index")) {
+      cols.push("first_safe_index");
+      vals.push("$3");
+      params.push(firstSafeIndex ?? null);
+    }
+    const sql = `update mines_rounds set ${cols.map((c, idx) => `${c}=${vals[idx]}`).join(", ")} where nonce=$1`;
+    await DB.pool.query(sql, params);
+  } catch (e) {
+    console.warn("[mines] update opened warn:", e?.message || e);
+  }
+}
+
+async function dbResolve(nonce, payoutLamports, resolvedSig, revealSeedHex) {
+  try {
+    if (!DB?.pool?.query) return;
+    await ensureCols();
+
+    const sets = [];
+    const params = [BigInt(nonce)];
+    let i = 2;
+
+    if (hasCol("status")) { sets.push(`status=$${i}`); params.push("resolved"); i++; }
+    if (hasCol("payout_lamports")) { sets.push(`payout_lamports=$${i}`); params.push(Number(payoutLamports || 0)); i++; }
+    const resolvedCol = pickFirst("resolved_tx_sig", "resolve_tx_sig", "resolved_sig");
+    if (resolvedCol) { sets.push(`${resolvedCol}=$${i}`); params.push(resolvedSig || null); i++; }
+    if (hasCol("server_seed")) { sets.push(`server_seed=$${i}`); params.push(revealSeedHex || null); i++; }
+    if (hasCol("resolved_at")) { sets.push(`resolved_at=now()`); }
+
+    if (!sets.length) return; // nothing to update
+
+    const sql = `update mines_rounds set ${sets.join(", ")} where nonce=$1`;
+    await DB.pool.query(sql, params);
+  } catch (e) {
+    console.warn("[mines] resolve update warn:", e?.message || e);
+  }
+}
+
+// ---------- HTTP router (fixes /mines/resolved 404) ----------
+function makeMinesRouter() {
+  const express = require("express");
+  const router = express.Router();
+
+  router.get("/ping", (req, res) => res.json({ ok: true }));
+
+  router.get("/resolved", async (req, res) => {
+    try {
+      if (!DB?.pool?.query) return res.json({ items: [], nextCursor: null });
+
+      await ensureCols();
+
+      const wallet = String(req.query.wallet || "").trim();
+      if (!wallet) return res.status(400).json({ error: "wallet required" });
+
+      let limit = Number(req.query.limit || 20);
+      if (!Number.isFinite(limit) || limit <= 0) limit = 20;
+      limit = Math.min(100, Math.max(1, limit));
+
+      const cursor =
+        req.query.cursor != null && req.query.cursor !== "" ? Number(req.query.cursor) : null;
+
+      const params = [wallet];
+      const whereParts = ["player=$1"];
+      if (hasCol("status")) whereParts.push(`status='resolved'`);
+      if (Number.isFinite(cursor) && cursor) {
+        params.push(cursor);
+        whereParts.push(`id < $2`);
+      }
+      const where = whereParts.join(" AND ");
+
+      // Build SELECT list that matches your schema
+      const sel = [
+        "id",
+        "player",
+        hasCol("bet_lamports") ? "bet_lamports" : "NULL::bigint as bet_lamports",
+        "nonce",
+        hasCol("rows") ? '"rows"' : "NULL::int as rows",
+        hasCol("cols") ? '"cols"' : "NULL::int as cols",
+        hasCol("mines") ? "mines" : "NULL::int as mines",
+        hasCol("rtp_bps") ? "rtp_bps" : "NULL::int as rtp_bps",
+        hasCol("payout_lamports") ? "payout_lamports" : "0::bigint as payout_lamports",
+        hasCol("server_seed_hash") ? "server_seed_hash" : "NULL::text as server_seed_hash",
+        hasCol("server_seed") ? "server_seed AS server_seed_hex" : "NULL::text as server_seed_hex",
+        hasCol("first_hmac_hex") ? "first_hmac_hex" : "NULL::text as first_hmac_hex",
+        hasCol("client_seed") ? "client_seed" : "''::text as client_seed",
+        hasCol("first_safe_index") ? "first_safe_index" : "NULL::int as first_safe_index",
+        hasCol("opened_json") ? "opened_json" : "NULL::jsonb as opened_json",
+        hasCol("lock_sig") ? "lock_sig AS lock_tx_sig"
+          : (hasCol("lock_tx_sig") ? "lock_tx_sig" : "NULL::text AS lock_tx_sig"),
+        (pickFirst("resolved_tx_sig", "resolve_tx_sig", "resolved_sig") || "NULL::text") + " AS resolved_tx_sig",
+        hasCol("status") ? "status" : "'resolved'::text as status",
+        hasCol("created_at") ? "created_at" : "NULL::timestamp as created_at",
+        hasCol("resolved_at") ? "resolved_at" : "NULL::timestamp as resolved_at",
+      ];
+
+      const sql =
+        `SELECT ${sel.join(", ")}
+           FROM mines_rounds
+          WHERE ${where}
+          ORDER BY id DESC
+          LIMIT ${limit};`;
+
+      const q = await DB.pool.query(sql, params);
+      const items = q.rows || [];
+      const nextCursor = items.length === limit ? Number(items[items.length - 1].id) : null;
+
+      res.json({ items, nextCursor });
+    } catch (e) {
+      console.error("[GET /mines/resolved] error:", e);
+      res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  return router;
+}
+
+function attachMinesRoutes(app) {
+  if (!app) return;
+  const router = makeMinesRouter();
+  app.use("/mines", router);
+  // (optional) also at /api/mines for frontends expecting /api prefix
+  app.use("/api/mines", router);
+  console.log("[mines] HTTP routes mounted at /mines and /api/mines");
+}
+
+// ---------- WebSocket attach (unchanged game logic) ----------
 function attachMines(io) {
   io.on("connection", (socket) => {
     socket.on("register", ({ player }) => { socket.data.player = String(player || "guest"); });
 
-    // ---- place / lock ----
+    // place / lock
     socket.on("mines:place", async ({ player, betAmountLamports, rows, cols, minesCount, clientSeed }) => {
       try {
         if (!player) return socket.emit("mines:error", { code: "NO_PLAYER", message: "player required" });
 
-        const cfg = await DB.getGameConfig?.("mines").catch(()=>null);
-        if (cfg && (!cfg.enabled || !cfg.running)) return socket.emit("mines:error", { code: "DISABLED", message: "Mines disabled by admin" });
+        const cfg = await DB.getGameConfig?.("mines").catch(() => null);
+        if (cfg && (!cfg.enabled || !cfg.running)) {
+          return socket.emit("mines:error", { code: "DISABLED", message: "Mines disabled by admin" });
+        }
 
-        const min = BigInt(cfg?.min_bet_lamports ?? 50000);
+        const min = BigInt(cfg?.min_bet_lamports ?? 50_000n);
         const max = BigInt(cfg?.max_bet_lamports ?? 5_000_000_000n);
+
         const betLamports = BigInt(betAmountLamports || 0);
-        if (!(betLamports > 0n)) return socket.emit("mines:error", { code:"BAD_BET", message:"betAmountLamports must be > 0" });
-        if (betLamports < min || betLamports > max) return socket.emit("mines:error", { code:"BET_RANGE", message:"Bet outside allowed range" });
+        if (!(betLamports > 0n)) return socket.emit("mines:error", { code: "BAD_BET", message: "betAmountLamports must be > 0" });
+        if (betLamports < min || betLamports > max) return socket.emit("mines:error", { code: "BET_RANGE", message: "Bet outside allowed range" });
 
         const R = clamp(i32(rows), 2, 8);
         const C = clamp(i32(cols), 2, 8);
         const M = clamp(i32(minesCount), 1, R * C - 1);
 
-        const playerPk   = new PublicKey(player);
+        const wallet     = String(player);
+        const playerPk   = new PublicKey(wallet);
         const userVault  = deriveUserVaultPda(playerPk);
         const houseVault = deriveVaultPda();
+
         const nonce      = Date.now();
         const expiryUnix = Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
-        const pending    = derivePendingRoundPda(playerPk, nonce);
+        const pendingPda = derivePending ? derivePending(playerPk, nonce) : null;
 
-        // Create serverSeed & commitment
+        const fakeMode = await Promo.isFakeMode(wallet).catch(() => false);
+
         const serverSeed = crypto.randomBytes(32);
         const serverSeedHash = sha256Hex(serverSeed);
 
-        // compute firstHmac for quick verification
-        const firstHmacHex = crypto.createHmac('sha256', serverSeed)
+        const firstHmacHex = crypto
+          .createHmac("sha256", serverSeed)
           .update(playerPk.toBuffer())
           .update(Buffer.from(String(nonce)))
           .update(Buffer.from(String(clientSeed || "")))
-          .digest('hex');
-
-        // ed25519 pre-ix
-        const msg = Buffer.from(`MINES|${player}|${Number(betLamports)}|${R}x${C}|${M}|${nonce}|${expiryUnix}`);
-        const edSig = await signMessageEd25519(msg);
-        const edIx  = buildEd25519VerifyIx({ message: msg, signature: edSig, publicKey: ADMIN_PK });
-        const edIndex = 1;
-
-        const feePayer = await getServerKeypair();
-        const cuLimit  = ComputeBudgetProgram.setComputeUnitLimit({ units: 900_000 });
-        const cuPrice  = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
+          .digest("hex");
 
         await precheckOrThrow({
-          userWallet: player,
+          userWallet: wallet,
           stakeLamports: betLamports,
           gameKey: "mines",
-        });
+        }).catch(() => {});
 
-        const lockIx = ixMinesLock({
-          programId: PROGRAM_ID,
-          player: playerPk,
-          feePayer: feePayer.publicKey,
-          userVault,
-          houseVault,
-          pendingRound: pending,
-          betAmount: Number(betLamports),
-          rows: R, cols: C, mines: M,
-          nonce, expiryUnix, edIndex,
-        });
-
-        const { blockhash } = await connection.getLatestBlockhash("confirmed");
-        const msgV0 = new TransactionMessage({
-          payerKey: feePayer.publicKey,
-          recentBlockhash: blockhash,
-          instructions: [cuPrice, cuLimit, edIx, lockIx],
-        }).compileToV0Message();
-        const vtx = new VersionedTransaction(msgV0);
-        const sim = await connection.simulateTransaction(vtx, { sigVerify: false }).catch(()=>null);
-        if (sim?.value?.err) throw new Error(`Mines lock simulate failed: ${JSON.stringify(sim.value.err)}\n${(sim.value?.logs || []).join("\n")}`);
-
-        vtx.sign([feePayer]);
-        const sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
-        await connection.confirmTransaction(sig, "confirmed");
-
-        // store round
-        rounds.set(nonce, {
+        const ctx = {
+          mode: fakeMode ? "fake" : "real",
           playerPk,
           betLamports: BigInt(betLamports),
           rows: R, cols: C, mines: M,
-          opened: new Set(), bombs: null,
-          rtpBps: cfg?.rtp_bps ?? 9800,
+          opened: new Set(),
+          bombs: null,
+          rtpBps: Number(cfg?.rtp_bps ?? 9800),
           over: false,
           nonce,
           expiryUnix,
+          pending: pendingPda ? pendingPda.toBase58() : null,
           serverSeed,
           serverSeedHash,
           clientSeed: clientSeed || "",
           firstHmacHex,
           firstSafeIndex: null,
-          pending: pending.toBase58(),
-        });
+        };
 
-        // persist
-        try {
-          if (typeof DB.pool?.query === "function") {
-            await DB.pool.query(
-              `insert into mines_rounds(player, nonce, bet_lamports, rows, cols, mines, server_seed_hash, server_seed, client_seed, status, lock_sig, expiry_unix)
-               values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'locked',$10,$11)`,
-              [
-                playerPk.toBase58(),
-                BigInt(nonce),
-                Number(betLamports),
-                R, C, M,
-                serverSeedHash,
-                serverSeed.toString('hex'),
-                clientSeed || "",
-                sig,
-                expiryUnix
-              ]
-            );
+        let txSig;
+        if (ctx.mode === "fake") {
+          await Promo.freezeForBet(wallet, String(betLamports));
+          txSig = `FAKE-LOCK-${nonce}`;
+        } else {
+          const feePayer = await getServerKeypair();
+          const msg = Buffer.from(`MINES_LOCK_V1|${wallet}|${Number(betLamports)}|${R}x${C}|${M}|${nonce}|${expiryUnix}`);
+          const edSig = await signMessageEd25519(msg);
+          const edIx  = buildEd25519VerifyIx({ message: msg, signature: edSig, publicKey: ADMIN_PK });
+          const edIndex = 1;
+
+          const cuLimit = ComputeBudgetProgram.setComputeUnitLimit({ units: 900_000 });
+          const cuPrice = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
+
+          const lockIx = ixMinesLock({
+            programId: PROGRAM_ID,
+            player: playerPk,
+            feePayer: feePayer.publicKey,
+            userVault,
+            houseVault,
+            pendingRound: pendingPda,
+            betAmount: Number(betLamports),
+            rows: R, cols: C, mines: M,
+            nonce, expiryUnix, edIndex,
+          });
+
+          const { blockhash } = await connection.getLatestBlockhash("confirmed");
+          const msgV0 = new TransactionMessage({
+            payerKey: feePayer.publicKey,
+            recentBlockhash: blockhash,
+            instructions: [cuPrice, cuLimit, edIx, lockIx],
+          }).compileToV0Message();
+
+          const vtx = new VersionedTransaction(msgV0);
+          const sim = await connection.simulateTransaction(vtx, { sigVerify: false }).catch(() => null);
+          if (sim?.value?.err) {
+            const logs = (sim.value?.logs || []).join("\n");
+            throw new Error(`Mines lock simulate failed: ${JSON.stringify(sim.value.err)}\n${logs}`);
           }
-        } catch (e) {
-          console.warn("mines: DB insert warn:", e?.message || e);
+          vtx.sign([feePayer]);
+          txSig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
+          await connection.confirmTransaction(txSig, "confirmed");
         }
 
-        await DB.recordBet?.({
-          player: playerPk.toBase58(),
+        rounds.set(nonce, ctx);
+        await dbInsertLockedRow(ctx, txSig, ctx.mode);
+
+        DB.recordBet?.({
+          player: wallet,
           amount: String(betLamports),
           betType: -1,
           target: -1,
           roll: 0,
           payout: 0,
           nonce, expiry: expiryUnix,
-          signature_base58: sig,
-        }).catch(()=>{});
+          signature_base58: txSig,
+          mode: ctx.mode,
+        }).catch(() => {});
 
         socket.emit("mines:locked", {
           nonce: String(nonce),
-          txSig: sig,
+          txSig,
           rows: R, cols: C, mines: M,
           serverSeedHash,
           firstHmacHex,
@@ -544,86 +437,148 @@ function attachMines(io) {
       }
     });
 
-    // ---- open tile ----
+    // open tile
     socket.on("mines:open", async ({ nonce, row, col }) => {
       try {
         let ctx = rounds.get(Number(nonce));
-        if (!ctx && typeof DB.pool?.query === "function") {
+
+        if (!ctx && DB?.pool?.query) {
           try {
-            const r = await DB.pool.query(`select * from mines_rounds where nonce=$1 limit 1`, [BigInt(nonce)]);
-            const rowr = r.rows[0] || null;
-            if (rowr) {
+            await ensureCols();
+            const q = await DB.pool.query(`select * from mines_rounds where nonce=$1 limit 1`, [BigInt(nonce)]);
+            const w = q.rows[0] || null;
+            if (w) {
               ctx = {
-                playerPk: new PublicKey(rowr.player),
-                betLamports: BigInt(rowr.bet_lamports || rowr.bet_amount || 0),
-                rows: Number(rowr.rows),
-                cols: Number(rowr.cols),
-                mines: Number(rowr.mines),
-                opened: new Set(JSON.parse(rowr.opened_json || "[]")),
+                mode: w.mode || "real",
+                playerPk: new PublicKey(w.player),
+                betLamports: BigInt(w.bet_lamports || w.bet_amount || 0),
+                rows: Number(w.rows),
+                cols: Number(w.cols),
+                mines: Number(w.mines),
+                opened: new Set(JSON.parse(w.opened_json || "[]")),
                 bombs: null,
-                rtpBps: rowr.rtp_bps ?? 9800,
-                over: rowr.status === 'resolved',
-                nonce: Number(rowr.nonce),
-                expiryUnix: Number(rowr.expiry_unix || 0),
-                serverSeed: rowr.server_seed ? Buffer.from(rowr.server_seed, 'hex') : null,
-                serverSeedHash: rowr.server_seed_hash,
-                clientSeed: rowr.client_seed || "",
-                pending: rowr.pending_round || null,
-                firstHmacHex: rowr.first_hmac_hex || null,
-                firstSafeIndex: rowr.first_safe_index ?? null,
+                rtpBps: Number(w.rtp_bps ?? 9800),
+                over: w.status === "resolved",
+                nonce: Number(w.nonce),
+                expiryUnix: Number(w.expiry_unix || 0),
+                serverSeed: w.server_seed ? Buffer.from(w.server_seed, "hex") : null,
+                serverSeedHash: w.server_seed_hash || null,
+                clientSeed: w.client_seed || "",
+                pending: w.pending_round || w.pending_mines_round || null,
+                firstHmacHex: w.first_hmac_hex || null,
+                firstSafeIndex: w.first_safe_index != null ? Number(w.first_safe_index) : null,
               };
               rounds.set(Number(nonce), ctx);
             }
-          } catch(err){ console.warn("mines: DB restore warn:", err?.message || err); }
+          } catch (err) {
+            console.warn("mines: DB restore warn:", err?.message || err);
+          }
         }
+
         if (!ctx) return socket.emit("mines:error", { code: "NOT_FOUND", message: "no round" });
         if (ctx.over) return;
 
         const r = i32(row), c = i32(col);
-        if (r < 0 || c < 0 || r >= ctx.rows || c >= ctx.cols)
+        if (r < 0 || c < 0 || r >= ctx.rows || c >= ctx.cols) {
           return socket.emit("mines:error", { code: "BAD_COORD", message: "row/col out of range" });
+        }
 
         const idx = r * ctx.cols + c;
         if (ctx.opened.has(idx)) return;
 
         if (!ctx.bombs) {
-          if (!ctx.serverSeed) {
+          if (!ctx.serverSeed && DB?.pool?.query) {
             try {
-              if (typeof DB.pool?.query === "function") {
-                const q = await DB.pool.query(`select server_seed from mines_rounds where nonce=$1 limit 1`, [BigInt(nonce)]);
-                const rw = q.rows[0] || null;
-                if (rw && rw.server_seed) ctx.serverSeed = Buffer.from(rw.server_seed, 'hex');
-              }
+              const q = await DB.pool.query(`select server_seed from mines_rounds where nonce=$1 limit 1`, [BigInt(nonce)]);
+              const rw = q.rows[0] || null;
+              if (rw?.server_seed) ctx.serverSeed = Buffer.from(rw.server_seed, "hex");
             } catch (err) { console.warn("mines:read seed warn:", err?.message || err); }
           }
           if (!ctx.serverSeed) throw new Error("serverSeed missing for round (cannot derive bombs)");
-          // record firstSafeIndex
+
           ctx.firstSafeIndex = idx;
           ctx.bombs = deriveBombs({
             rows: ctx.rows, cols: ctx.cols, mines: ctx.mines,
             playerPk: ctx.playerPk, nonce: Number(nonce),
             firstSafeIndex: ctx.firstSafeIndex,
             serverSeed: ctx.serverSeed,
-            clientSeed: ctx.clientSeed || ""
+            clientSeed: ctx.clientSeed || "",
           });
         }
 
         if (ctx.bombs.has(idx)) {
           ctx.over = true;
-          const serverSeedHex = ctx.serverSeed.toString('hex');
+
+          const serverSeedHex = ctx.serverSeed.toString("hex");
           const recomputedHash = sha256Hex(ctx.serverSeed);
-          const firstHmac = crypto.createHmac('sha256', ctx.serverSeed)
+          const firstHmac = crypto
+            .createHmac("sha256", ctx.serverSeed)
             .update(ctx.playerPk.toBuffer())
             .update(Buffer.from(String(ctx.nonce)))
             .update(Buffer.from(String(ctx.clientSeed || "")))
-            .digest('hex');
+            .digest("hex");
 
-          // reveal everything including bomb indices + opened list
-          const bombIndices = Array.from(ctx.bombs).sort((a,b)=>a-b);
-          const openedArr = Array.from(ctx.opened).sort((a,b)=>a-b);
+          const openedArr = Array.from(ctx.opened).sort((a, b) => a - b);
+          const bombIndices = Array.from(ctx.bombs).sort((a, b) => a - b);
 
-          socket.emit("mines:boom", {
-            nonce: String(nonce),
+          let txSig = null;
+          if (ctx.mode === "fake") {
+            await Promo.settleBet(ctx.playerPk.toBase58(), "0");
+            txSig = `FAKE-RESOLVE-${ctx.nonce}-LOSS`;
+          } else {
+            const feePayer   = await getServerKeypair();
+            const playerPk   = ctx.playerPk;
+            const houseVault = deriveVaultPda();
+            const adminPda   = deriveAdminPda();
+            const userVault  = deriveUserVaultPda(playerPk);
+            const pendingPda = derivePending ? derivePending(playerPk, ctx.nonce) : null;
+
+            const checksum = minesChecksum(ctx.nonce);
+            const msg = Buffer.from(`MINES_RESOLVE_V1|${playerPk.toBase58()}|${ctx.nonce}|${checksum}|0`);
+            const edSig = await signMessageEd25519(msg);
+            const edIx  = buildEd25519VerifyIx({ message: msg, signature: edSig, publicKey: ADMIN_PK });
+            const edIndex = 1;
+
+            const ix = ixMinesResolve({
+              programId: PROGRAM_ID,
+              player: playerPk,
+              houseVault,
+              adminPda,
+              userVault,
+              pendingRound: pendingPda,
+              checksum,
+              payout: 0,
+              edIndex,
+            });
+
+            const cu = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
+            const { blockhash } = await connection.getLatestBlockhash("confirmed");
+            const msgV0 = new TransactionMessage({
+              payerKey: feePayer.publicKey,
+              recentBlockhash: blockhash,
+              instructions: [cu, edIx, ix],
+            }).compileToV0Message();
+            const vtx = new VersionedTransaction(msgV0);
+            vtx.sign([feePayer]);
+            txSig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
+            await connection.confirmTransaction(txSig, "confirmed");
+          }
+
+          await dbUpdateOpened(ctx.nonce, ctx.opened, ctx.firstSafeIndex);
+          await dbResolve(ctx.nonce, 0, txSig, serverSeedHex);
+          try {
+            await DB.recordGameRound?.({
+              game_key: "mines",
+              player: ctx.playerPk.toBase58(),
+              nonce: Number(ctx.nonce),
+              stake_lamports: Number(ctx.betLamports),
+              payout_lamports: 0,
+              result_json: { rows: ctx.rows, cols: ctx.cols, mines: ctx.mines, opened: openedArr, boomAt: idx, bombs: bombIndices, mode: ctx.mode },
+            });
+          } catch (_) {}
+
+          const payload = {
+            nonce: String(ctx.nonce),
             atIndex: idx,
             atStep: ctx.opened.size,
             rows: ctx.rows, cols: ctx.cols, mines: ctx.mines,
@@ -634,70 +589,11 @@ function attachMines(io) {
             serverSeedHash: ctx.serverSeedHash || recomputedHash,
             clientSeed: ctx.clientSeed || "",
             firstHmacHex: firstHmac,
-            formula: "HMAC_SHA256(serverSeed, playerPubKey + nonce + clientSeed) -> deterministic tiles selection (first click safe)"
-          });
+            formula: "HMAC_SHA256(serverSeed, playerPubKey + nonce + clientSeed) -> deterministic tiles selection (first click safe)",
+          };
 
-          // resolve on-chain payout = 0
-          const feePayer   = await getServerKeypair();
-          const playerPk   = ctx.playerPk;
-          const houseVault = deriveVaultPda();
-          const adminPda   = deriveAdminPda();
-          const userVault  = deriveUserVaultPda(playerPk);
-          const pending    = derivePendingRoundPda(playerPk, ctx.nonce);
-
-          const checksum = minesChecksum(ctx.nonce);
-          const msg = Buffer.from(`MINES_RESOLVE|${playerPk.toBase58()}|${ctx.nonce}|${checksum}|0`);
-          const edSig = await signMessageEd25519(msg);
-          const edIx  = buildEd25519VerifyIx({ message: msg, signature: edSig, publicKey: require("./signer").ADMIN_PK });
-          const edIndex = 1;
-
-          const ix = ixMinesResolve({
-            programId: PROGRAM_ID,
-            player: playerPk,
-            houseVault,
-            adminPda,
-            userVault,
-            pendingRound: pending,
-            checksum,
-            payout: 0,
-            edIndex,
-          });
-
-          const cu = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
-          const { blockhash } = await connection.getLatestBlockhash("confirmed");
-          const msgV0 = new TransactionMessage({
-            payerKey: feePayer.publicKey,
-            recentBlockhash: blockhash,
-            instructions: [cu, edIx, ix],
-          }).compileToV0Message();
-          const vtx = new VersionedTransaction(msgV0);
-          vtx.sign([feePayer]);
-          const sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
-          await connection.confirmTransaction(sig, "confirmed");
-
-          try {
-            await DB.recordGameRound?.({
-              game_key: "mines",
-              player: playerPk.toBase58(),
-              nonce: Number(ctx.nonce),
-              stake_lamports: Number(ctx.betLamports),
-              payout_lamports: 0,
-              result_json: { rows: ctx.rows, cols: ctx.cols, mines: ctx.mines, opened: openedArr, boomAt: idx, bombs: bombIndices },
-            });
-          } catch (err) { console.warn("mines:record warn:", err?.message || err); }
-
-          io.emit("mines:resolved", {
-            nonce: String(ctx.nonce),
-            payoutLamports: 0,
-            safeSteps: ctx.opened.size,
-            tx: sig,
-            rows: ctx.rows, cols: ctx.cols, mines: ctx.mines,
-            opened: openedArr,
-            firstSafeIndex: ctx.firstSafeIndex,
-            bombIndices,
-            serverSeedHex, serverSeedHash: ctx.serverSeedHash || recomputedHash, clientSeed: ctx.clientSeed || "", firstHmacHex: firstHmac,
-            formula: "HMAC_SHA256(serverSeed, playerPubKey + nonce + clientSeed) -> deterministic tiles selection (first click safe)"
-          });
+          socket.emit("mines:boom", payload);
+          io.emit("mines:resolved", { ...payload, payoutLamports: 0, tx: txSig, safeSteps: ctx.opened.size });
 
           rounds.delete(Number(ctx.nonce));
           return;
@@ -705,6 +601,8 @@ function attachMines(io) {
 
         // safe tile
         ctx.opened.add(idx);
+        await dbUpdateOpened(ctx.nonce, ctx.opened, ctx.firstSafeIndex);
+
         const totalTiles = ctx.rows * ctx.cols;
         const mult = multiplierFor(ctx.opened.size, totalTiles, ctx.mines, ctx.rtpBps);
 
@@ -715,120 +613,140 @@ function attachMines(io) {
       }
     });
 
-    // ---- cashout ----
+    // cashout
     socket.on("mines:cashout", async ({ nonce }) => {
       try {
         let ctx = rounds.get(Number(nonce));
         if (!ctx) return socket.emit("mines:error", { code: "NOT_FOUND", message: "no round" });
         if (ctx.over) return;
-        if (ctx.opened.size < 1) return socket.emit("mines:error", { code: "TOO_SOON", message: "Open at least 1 tile before cashout" });
+        if (ctx.opened.size < 1) {
+          return socket.emit("mines:error", { code: "TOO_SOON", message: "Open at least 1 tile before cashout" });
+        }
 
         if (!ctx.bombs) {
           const firstSafeIndex = ctx.opened.size > 0 ? [...ctx.opened][0] : 0;
           ctx.firstSafeIndex = ctx.firstSafeIndex ?? firstSafeIndex;
-          if (!ctx.serverSeed) {
+
+          if (!ctx.serverSeed && DB?.pool?.query) {
             try {
-              if (typeof DB.pool?.query === "function") {
-                const q = await DB.pool.query(`select server_seed from mines_rounds where nonce=$1 limit 1`, [BigInt(nonce)]);
-                const rw = q.rows[0] || null;
-                if (rw && rw.server_seed) ctx.serverSeed = Buffer.from(rw.server_seed, 'hex');
-              }
+              const q = await DB.pool.query(`select server_seed from mines_rounds where nonce=$1 limit 1`, [BigInt(nonce)]);
+              const w = q.rows[0] || null;
+              if (w?.server_seed) ctx.serverSeed = Buffer.from(w.server_seed, "hex");
             } catch (err) { console.warn("mines:read seed warn:", err?.message || err); }
           }
           if (!ctx.serverSeed) throw new Error("serverSeed missing for round (cannot derive bombs)");
+
           ctx.bombs = deriveBombs({
             rows: ctx.rows, cols: ctx.cols, mines: ctx.mines,
             playerPk: ctx.playerPk, nonce: Number(nonce),
             firstSafeIndex: ctx.firstSafeIndex,
             serverSeed: ctx.serverSeed,
-            clientSeed: ctx.clientSeed || ""
+            clientSeed: ctx.clientSeed || "",
           });
         }
 
         const totalTiles = ctx.rows * ctx.cols;
         const mult = multiplierFor(ctx.opened.size, totalTiles, ctx.mines, ctx.rtpBps);
-        const payout = (ctx.betLamports * BigInt(Math.floor(mult * 10000))) / 10000n;
+        const multBps = Math.floor(mult * 10000);
+        const payoutGross = (ctx.betLamports * BigInt(multBps)) / 10000n;
+        const netProfit = payoutGross - ctx.betLamports;
 
         ctx.over = true;
 
-        const feePayer   = await getServerKeypair();
-        const playerPk   = ctx.playerPk;
-        const houseVault = deriveVaultPda();
-        const adminPda   = deriveAdminPda();
-        const userVault  = deriveUserVaultPda(playerPk);
-        const pending    = derivePendingRoundPda(playerPk, ctx.nonce);
+        let txSig;
+        if (ctx.mode === "fake") {
+          await Promo.settleBet(ctx.playerPk.toBase58(), netProfit > 0n ? netProfit.toString() : "0");
+          txSig = `FAKE-RESOLVE-${ctx.nonce}-WIN`;
+        } else {
+          const feePayer   = await getServerKeypair();
+          const playerPk   = ctx.playerPk;
+          const houseVault = deriveVaultPda();
+          const adminPda   = deriveAdminPda();
+          const userVault  = deriveUserVaultPda(playerPk);
+          const pendingPda = derivePending ? derivePending(playerPk, ctx.nonce) : null;
 
-        const checksum = minesChecksum(ctx.nonce);
-        const msg = Buffer.from(`MINES_RESOLVE|${playerPk.toBase58()}|${ctx.nonce}|${checksum}|${payout.toString()}`);
-        const edSig = await signMessageEd25519(msg);
-        const edIx  = buildEd25519VerifyIx({ message: msg, signature: edSig, publicKey: require("./signer").ADMIN_PK });
-        const edIndex = 1;
+          const checksum = minesChecksum(ctx.nonce);
+          const msg = Buffer.from(`MINES_RESOLVE_V1|${playerPk.toBase58()}|${ctx.nonce}|${checksum}|${payoutGross.toString()}`);
+          const edSig = await signMessageEd25519(msg);
+          const edIx  = buildEd25519VerifyIx({ message: msg, signature: edSig, publicKey: ADMIN_PK });
+          const edIndex = 1;
 
-        const ix = ixMinesResolve({
-          programId: PROGRAM_ID,
-          player: playerPk,
-          houseVault,
-          adminPda,
-          userVault,
-          pendingRound: pending,
-          checksum,
-          payout: Number(payout),
-          edIndex,
-        });
+          const ix = ixMinesResolve({
+            programId: PROGRAM_ID,
+            player: playerPk,
+            houseVault,
+            adminPda,
+            userVault,
+            pendingRound: pendingPda,
+            checksum,
+            payout: Number(payoutGross),
+            edIndex,
+          });
 
-        const cu = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
-        const { blockhash } = await connection.getLatestBlockhash("confirmed");
-        const msgV0 = new TransactionMessage({
-          payerKey: feePayer.publicKey,
-          recentBlockhash: blockhash,
-          instructions: [cu, edIx, ix],
-        }).compileToV0Message();
-        const vtx = new VersionedTransaction(msgV0);
-        const sim = await connection.simulateTransaction(vtx, { sigVerify: false });
-        if (sim?.value?.err) throw new Error(`Mines resolve simulate failed: ${JSON.stringify(sim.value.err)}\n${(sim.value?.logs || []).join("\n")}`);
+          const cu = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
+          const { blockhash } = await connection.getLatestBlockhash("confirmed");
+          const msgV0 = new TransactionMessage({
+            payerKey: feePayer.publicKey,
+            recentBlockhash: blockhash,
+            instructions: [cu, edIx, ix],
+          }).compileToV0Message();
 
-        vtx.sign([feePayer]);
-        const sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
-        await connection.confirmTransaction(sig, "confirmed");
+          const vtx = new VersionedTransaction(msgV0);
+          const sim = await connection.simulateTransaction(vtx, { sigVerify: false }).catch(() => null);
+          if (sim?.value?.err) {
+            const logs = (sim.value?.logs || []).join("\n");
+            throw new Error(`Mines resolve simulate failed: ${JSON.stringify(sim.value.err)}\n${logs}`);
+          }
+          vtx.sign([feePayer]);
+          txSig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
+          await connection.confirmTransaction(txSig, "confirmed");
+        }
 
-        // reveal info
-        const serverSeedHex = ctx.serverSeed ? ctx.serverSeed.toString('hex') : null;
+        const serverSeedHex = ctx.serverSeed ? ctx.serverSeed.toString("hex") : null;
         const recomputedHash = ctx.serverSeed ? sha256Hex(ctx.serverSeed) : null;
-        const firstHmac = ctx.serverSeed ? crypto.createHmac('sha256', ctx.serverSeed)
-          .update(ctx.playerPk.toBuffer())
-          .update(Buffer.from(String(ctx.nonce)))
-          .update(Buffer.from(String(ctx.clientSeed || "")))
-          .digest('hex') : null;
+        const firstHmac = ctx.serverSeed
+          ? crypto.createHmac("sha256", ctx.serverSeed)
+              .update(ctx.playerPk.toBuffer())
+              .update(Buffer.from(String(ctx.nonce)))
+              .update(Buffer.from(String(ctx.clientSeed || "")))
+              .digest("hex")
+          : null;
 
-        const bombIndices = Array.from(ctx.bombs).sort((a,b)=>a-b);
-        const openedArr = Array.from(ctx.opened).sort((a,b)=>a-b);
+        const bombIndices = Array.from(ctx.bombs).sort((a, b) => a - b);
+        const openedArr = Array.from(ctx.opened).sort((a, b) => a - b);
 
+        await dbUpdateOpened(ctx.nonce, ctx.opened, ctx.firstSafeIndex);
+        await dbResolve(ctx.nonce, payoutGross, txSig, serverSeedHex);
         try {
           await DB.recordGameRound?.({
             game_key: "mines",
-            player: playerPk.toBase58(),
+            player: ctx.playerPk.toBase58(),
             nonce: Number(ctx.nonce),
             stake_lamports: Number(ctx.betLamports),
-            payout_lamports: Number(payout),
-            result_json: { rows: ctx.rows, cols: ctx.cols, mines: ctx.mines, opened: openedArr, bombs: bombIndices },
+            payout_lamports: Number(payoutGross),
+            result_json: { rows: ctx.rows, cols: ctx.cols, mines: ctx.mines, opened: openedArr, bombs: bombIndices, mode: ctx.mode },
           });
-          await DB.recordActivity?.({ user: playerPk.toBase58(), action: "Mines cashout", amount: (Number(payout)/1e9).toFixed(4) });
-        } catch (err) { console.warn("mines:record warn:", err?.message || err); }
+          await DB.recordActivity?.({ user: ctx.playerPk.toBase58(), action: "Mines cashout", amount: (Number(payoutGross)/1e9).toFixed(4) });
+        } catch (_) {}
 
-        io.emit("mines:resolved", {
+        const payload = {
           nonce: String(ctx.nonce),
-          payoutLamports: Number(payout),
+          payoutLamports: Number(payoutGross),
           safeSteps: ctx.opened.size,
-          tx: sig,
+          tx: txSig,
           rows: ctx.rows, cols: ctx.cols, mines: ctx.mines,
           opened: openedArr,
           firstSafeIndex: ctx.firstSafeIndex,
           bombIndices,
-          serverSeedHex, serverSeedHash: ctx.serverSeedHash || recomputedHash,
+          serverSeedHex,
+          serverSeedHash: ctx.serverSeedHash || recomputedHash,
           clientSeed: ctx.clientSeed || "",
           firstHmacHex: firstHmac,
-          formula: "HMAC_SHA256(serverSeed, playerPubKey + nonce + clientSeed) -> deterministic tiles selection (first click safe)"
-        });
+          formula: "HMAC_SHA256(serverSeed, playerPubKey + nonce + clientSeed) -> deterministic tiles selection (first click safe)",
+        };
+
+        socket.emit("mines:resolved", payload);
+        io.emit("mines:resolved", payload);
 
         rounds.delete(Number(ctx.nonce));
       } catch (e) {
@@ -839,4 +757,4 @@ function attachMines(io) {
   });
 }
 
-module.exports = { attachMines };
+module.exports = { attachMines, attachMinesRoutes, makeMinesRouter };

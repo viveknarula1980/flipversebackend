@@ -5,6 +5,7 @@ const http = require("http");
 const { Server } = require("socket.io");
 const express = require("express");
 const cors = require("cors");
+
 const bodyParser = require("body-parser");
 const {
   PublicKey,
@@ -291,6 +292,51 @@ async function computeVaultLock(wallet) {
 // ---------- Withdraw fee config ----------
 const WITHDRAWAL_FEE_SOL = Number(process.env.WITHDRAWAL_FEE_SOL || 0.001);
 const WITHDRAWAL_FEE_LAMPORTS = Math.round(WITHDRAWAL_FEE_SOL * LAMPORTS_PER_SOL);
+
+// ---------- Column helpers for dynamic projections ----------
+const _colHas = new Map();
+async function colExists(table, column) {
+  const key = `${table}.${column}`;
+  if (_colHas.has(key)) return _colHas.get(key);
+  try {
+    const { rows } = await db.pool.query(
+      `select 1 from information_schema.columns where table_name=$1 and column_name=$2 limit 1`,
+      [table, column]
+    );
+    const ok = rows.length > 0;
+    _colHas.set(key, ok);
+    return ok;
+  } catch {
+    _colHas.set(key, false);
+    return false;
+  }
+}
+async function selectProjectionCoinflip() {
+  const has = (c) => colExists("coinflip_matches", c);
+  return [
+    "id",
+    "nonce",
+    "player_a",
+    "player_b",
+    "side_a",
+    "side_b",
+    "bet_lamports",
+    "outcome",
+    "winner",
+    "payout_lamports",
+    (await has("fee_bps")) ? "fee_bps" : "NULL::int as fee_bps",
+    (await has("resolve_sig_winner")) ? "resolve_sig_winner" : "NULL::text as resolve_sig_winner",
+    (await has("resolve_sig_loser")) ? "resolve_sig_loser" : "NULL::text as resolve_sig_loser",
+    (await has("server_seed_hash")) ? "server_seed_hash" : "NULL::text as server_seed_hash",
+    (await has("server_seed")) ? "server_seed as server_seed_hex" : "NULL::text as server_seed_hex",
+    (await has("first_hmac_hex")) ? "first_hmac_hex" : "NULL::text as first_hmac_hex",
+    (await has("client_seed_a")) ? "client_seed_a" : "''::text as client_seed_a",
+    (await has("client_seed_b")) ? "client_seed_b" : "''::text as client_seed_b",
+    (await has("status")) ? "status" : "'resolved'::text as status",
+    (await has("created_at")) ? "created_at" : "NULL::timestamptz as created_at",
+    (await has("resolved_at")) ? "resolved_at" : "NULL::timestamptz as resolved_at",
+  ].join(", ");
+}
 
 async function main() {
   try {
@@ -1277,7 +1323,7 @@ async function main() {
           ? mod[attachName]
           : null;
 
-      if (fn) {
+    if (fn) {
         fn(io);
         console.log(`${name} WS mounted`);
       } else {
@@ -1287,17 +1333,130 @@ async function main() {
       console.warn(`${name} WS not found / failed to mount:`, e?.message || e);
     }
   }
-  mountWs("./dice_ws", "Dice", "attachDice");
-  mountWs("./slots_ws", "Slots", "attachSlots");
-  mountWs("./crash_ws", "Crash", "attachCrash");
-  mountWs("./plinko_ws", "Plinko", "attachPlinko");
-  mountWs("./coinflip_ws", "Coinflip", "attachCoinflip");
+  try { require("./dice_ws").attachDiceRoutes?.(app); } catch (e) { console.warn("dice routes not mounted:", e?.message || e); }
+
+  // New: pass both io and app so the /dice/* REST routes are mounted
   try {
-    require("./mines_ws").attachMines(io);
-    console.log("Mines WS mounted");
+    const dice = require("./dice_ws");
+    await dice.ensureDiceSchema?.().catch(() => {}); // make sure columns exist
+    dice.attachDice?.(io, app);
+    console.log("Dice WS + routes mounted");
   } catch (e) {
-    console.warn("mines_ws not found / failed to mount:", e?.message || e);
+    console.warn("Dice mount failed:", e?.message || e);
   }
+
+  // ---------- COINFLIP REST (/coinflip/resolved) ----------
+  // Returns coinflip matches involving a given wallet, newest first, cursor-paginated.
+  app.get("/coinflip/resolved", async (req, res) => {
+    try {
+      const wallet = String(req.query.wallet || "");
+      const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
+      const cursor = req.query.cursor ? Number(req.query.cursor) : null;
+
+      if (!isMaybeBase58(wallet)) {
+        return res.status(400).json({ error: "bad wallet" });
+      }
+
+      const proj = await selectProjectionCoinflip();
+
+      if (cursor) {
+        const { rows } = await db.pool.query(
+          `
+          select ${proj}
+            from coinflip_matches
+           where status = 'resolved'
+             and (player_a = $1 or player_b = $1)
+             and id < $2
+           order by id desc
+           limit $3
+          `,
+          [wallet, cursor, limit]
+        );
+        const nextCursor = rows.length ? rows[rows.length - 1].id : null;
+        return res.json({
+          items: rows,
+          nextCursor,
+          verify: {
+            algorithm:
+              "HMAC_SHA256(serverSeed, clientSeedA + '|' + clientSeedB + '|' + nonce) -> first byte & 1",
+          },
+        });
+      } else {
+        const { rows } = await db.pool.query(
+          `
+          select ${proj}
+            from coinflip_matches
+           where status = 'resolved'
+             and (player_a = $1 or player_b = $1)
+           order by id desc
+           limit $2
+          `,
+          [wallet, limit]
+        );
+        const nextCursor = rows.length ? rows[rows.length - 1].id : null;
+        return res.json({
+          items: rows,
+          nextCursor,
+          verify: {
+            algorithm:
+              "HMAC_SHA256(serverSeed, clientSeedA + '|' + clientSeedB + '|' + nonce) -> first byte & 1",
+          },
+        });
+      }
+    } catch (e) {
+      console.error("[/coinflip/resolved] error:", e?.message || e);
+      return res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
+  // Other WS modules
+try {
+  const slots = require("./slots_ws");
+  slots.attachSlots(io);           // WS
+  slots.attachSlotsRoutes(app);    // HTTP: /slots and /api/slots
+  console.log("Slots WS + HTTP mounted");
+} catch (e) {
+  console.warn("slots_ws not found / failed to mount:", e?.message || e);
+}
+
+try {
+  const crash = require("./crash_ws");
+  await crash.ensureCrashSchema?.().catch(() => {});
+  crash.attachCrash?.(io, app);
+  console.log("Crash WS + routes mounted");
+} catch (e) {
+  console.warn("Crash mount failed:", e?.message || e);
+}
+try {
+  const plinko = require("./plinko_ws");
+  await plinko.ensurePlinkoSchema?.().catch(() => {});
+  plinko.attachPlinko?.(io, app);   // mounts WS + REST (/plinko/resolved)
+  console.log("Plinko WS + routes mounted");
+} catch (e) {
+  console.warn("Plinko mount failed:", e?.message || e);
+}// Dice: already mounted above with io + app
+
+// Coinflip: mount WS + REST and ensure schema
+try {
+  const coinflip = require("./coinflip_ws");
+  await coinflip.ensureCoinflipSchema?.().catch(() => {});
+  coinflip.attachCoinflip?.(io, app);
+  console.log("Coinflip WS + routes mounted");
+} catch (e) {
+  console.warn("Coinflip mount failed:", e?.message || e);
+}
+
+ try {
+  const mines = require("./mines_ws");
+  mines.attachMines(io);
+  console.log("Mines WS mounted");
+  if (typeof mines.attachMinesRoutes === "function") {
+    mines.attachMinesRoutes(app);
+  }
+} catch (e) {
+  console.warn("mines_ws not found / failed to mount:", e?.message || e);
+}
+
 
   console.log("DATABASE_URL =", process.env.DATABASE_URL);
 
@@ -1344,6 +1503,8 @@ async function main() {
   } catch (e) {
     console.warn("admin_auth_router not mounted:", e?.message || e);
   }
+
+  app.use("/admin/fake", require("./admin_fake_balance_router"));
 
   server.listen(PORT, () => {
     console.log(
