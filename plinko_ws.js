@@ -37,7 +37,6 @@ const { ixPlinkoLock, ixPlinkoResolve } = require("./solana_anchor_ix");
 const { ADMIN_PK, signMessageEd25519, getServerKeypair } = require("./signer");
 
 // ---------- fixed payout tables (multipliers & probabilities) ----------
-/ ---------- fixed payout tables (multipliers & probabilities) ----------
  const PLINKO_TABLE = {
   easy: {
     "8": [{"slot":0,"multiplier":0.0,"probability":0.003906},{"slot":1,"multiplier":0.2464,"probability":0.03125},{"slot":2,"multiplier":0.5288,"probability":0.109375},{"slot":3,"multiplier":0.8777,"probability":0.21875},{"slot":4,"multiplier":1.5541,"probability":0.273437},{"slot":5,"multiplier":0.8777,"probability":0.21875},{"slot":6,"multiplier":0.5288,"probability":0.109375},{"slot":7,"multiplier":0.2464,"probability":0.03125},{"slot":8,"multiplier":0.0,"probability":0.003906}],
@@ -798,4 +797,5 @@ module.exports = {
   attachPlinkoRoutes,
   ensurePlinkoSchema,
 };
+
 
