@@ -472,7 +472,6 @@ router.post("/chest/daily/claim", async (req, res) => {
     res.status(500).json({ error: e?.message || String(e) });
   }
 });
-
 router.get("/chest/weekly/eligibility", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
@@ -480,6 +479,8 @@ router.get("/chest/weekly/eligibility", async (req, res) => {
 
     // must have 7 consecutive daily chest claims (each daily claim itself required wagers)
     let ok = true;
+    let message = null;
+
     for (let i = 0; i < 7; i++) {
       const d = utcDate(); d.setUTCDate(d.getUTCDate() - i);
       const ymd = dateToYMD(d);
@@ -487,7 +488,11 @@ router.get("/chest/weekly/eligibility", async (req, res) => {
         `select 1 from promos_claims where type='daily' and user_wallet=$1 and date_utc=$2 limit 1`,
         [String(wallet), ymd]
       );
-      if (!rows.length) { ok = false; break; }
+      if (!rows.length) {
+        ok = false;
+        message = "Requires 7 consecutive daily chest claims.";
+        break;
+      }
     }
 
     // also, not already claimed this ISO week
@@ -497,14 +502,18 @@ router.get("/chest/weekly/eligibility", async (req, res) => {
         `select 1 from promos_claims where type='weekly' and user_wallet=$1 and week_key=$2 limit 1`,
         [String(wallet), wk]
       );
-      if (rows.length) ok = false;
+      if (rows.length) {
+        ok = false;
+        message = "Already claimed this week.";
+      }
     }
 
-    res.json({ eligible: ok });
+    res.json({ eligible: ok, message });
   } catch (e) {
     res.status(500).json({ error: e?.message || String(e) });
   }
 });
+
 
 router.post("/chest/weekly/claim", async (req, res) => {
   try {
