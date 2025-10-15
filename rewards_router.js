@@ -99,8 +99,16 @@ function parseAmountFromReward(reward) {
 }
 
 /* ------------ wagering helpers (user progress) ------------ */
+/**
+ * Returns total wagered **lamports** (BigInt) for a user across all games.
+ * Uses only integer columns:
+ * - game_rounds.stake_lamports
+ * - coinflip_matches.bet_lamports * 2  (attribute 2x bet per match to each player, matching your prior logic)
+ * - slots_spins.bet_amount_lamports    (generated column)
+ */
 async function getUserWageredLamports(userId) {
   const out = { gr: 0n, cf: 0n, ss: 0n };
+
   // game_rounds stake
   if (await db._tableExistsUnsafe?.("game_rounds")) {
     const { rows } = await db.pool.query(
@@ -111,6 +119,7 @@ async function getUserWageredLamports(userId) {
     );
     out.gr = BigInt(rows[0]?.s || "0");
   }
+
   // coinflip: 2*bet per match (both players)
   if (await db._tableExistsUnsafe?.("coinflip_matches")) {
     const { rows } = await db.pool.query(
@@ -121,18 +130,33 @@ async function getUserWageredLamports(userId) {
     );
     out.cf = BigInt(rows[0]?.s || "0");
   }
-  // slots_spins: bet_amount
+
+  // slots_spins: use **lamports** generated column
   if (await db._tableExistsUnsafe?.("slots_spins")) {
-    const { rows } = await db.pool.query(
-      `select coalesce(sum(bet_amount),0)::text as s
-         from slots_spins
-        where player=$1`,
-      [String(userId)]
-    );
-    out.ss = BigInt(rows[0]?.s || "0");
+    // Prefer generated column; fallback to floor(bet_amount*1e9) if column missing
+    let q;
+    try {
+      q = await db.pool.query(
+        `select coalesce(sum(bet_amount_lamports),0)::text as s
+           from slots_spins
+          where player=$1`,
+        [String(userId)]
+      );
+    } catch (_e) {
+      // Backward-compat fallback
+      q = await db.pool.query(
+        `select coalesce(sum(floor(bet_amount*1e9)),0)::text as s
+           from slots_spins
+          where player=$1`,
+        [String(userId)]
+      );
+    }
+    out.ss = BigInt(q.rows[0]?.s || "0");
   }
+
   return out.gr + out.cf + out.ss;
 }
+
 function lamportsToUsd(lamports) {
   return (Number(lamports) / 1e9) * USD_PER_SOL;
 }
@@ -314,7 +338,7 @@ router.delete("/admin/levels/:id", async (req, res) => {
   try {
     const resolvedId = await resolveLevelPk(req.params.id);
     if (!resolvedId) return res.status(404).json({ error: "level not found" });
-    const q = await db.pool.query(`delete from levels where id=$1`, [resolvedId]);
+  const q = await db.pool.query(`delete from levels where id=$1`, [resolvedId]);
     if (q.rowCount === 0) return res.status(404).json({ error: "level not found" });
     res.json({ ok: true });
   } catch (e) {
@@ -369,8 +393,8 @@ router.get("/rewards/users/:userId/progress", async (req, res) => {
     );
 
     // wagering so far in USD
-    const lamports = await getUserWageredLamports(userId);
-    const currentWagered = lamportsToUsd(lamports);
+    const lamports = await getUserWageredLamports(userId); // BigInt
+    const currentWagered = lamportsToUsd(lamports);        // Number (display)
 
     // compute availability based on parsed $ requirement from levels.wagering
     const availableToClaim = [];
@@ -589,11 +613,21 @@ async function aggregateWageredLamportsMap() {
   }
 
   if (await db._tableExistsUnsafe?.("slots_spins")) {
-    const { rows } = await db.pool.query(
-      `select player as wallet, coalesce(sum(bet_amount),0)::text as s
-         from slots_spins group by player`
-    );
-    for (const r of rows) add(r.wallet, r.s || "0");
+    // Use lamports (generated) for slots
+    let rows;
+    try {
+      rows = await db.pool.query(
+        `select player as wallet, coalesce(sum(bet_amount_lamports),0)::text as s
+           from slots_spins group by player`
+      );
+    } catch (_e) {
+      // Fallback if generated column doesn't exist in some env
+      rows = await db.pool.query(
+        `select player as wallet, coalesce(sum(floor(bet_amount*1e9)),0)::text as s
+           from slots_spins group by player`
+      );
+    }
+    for (const r of rows.rows) add(r.wallet, r.s || "0");
   }
 
   return map;
@@ -643,14 +677,25 @@ async function aggregateWageredLamportsMapWindow(start, end = null) {
   }
 
   if (await db._tableExistsUnsafe?.("slots_spins")) {
-    const { rows } = await db.pool.query(
-      `select player as wallet, coalesce(sum(bet_amount),0)::text as s
-         from slots_spins
-        where created_at >= $1 and created_at < $2
-        group by player`,
-      [s, e]
-    );
-    for (const r of rows) add(r.wallet, r.s || "0");
+    let rows;
+    try {
+      rows = await db.pool.query(
+        `select player as wallet, coalesce(sum(bet_amount_lamports),0)::text as s
+           from slots_spins
+          where created_at >= $1 and created_at < $2
+          group by player`,
+        [s, e]
+      );
+    } catch (_e) {
+      rows = await db.pool.query(
+        `select player as wallet, coalesce(sum(floor(bet_amount*1e9)),0)::text as s
+           from slots_spins
+          where created_at >= $1 and created_at < $2
+          group by player`,
+        [s, e]
+      );
+    }
+    for (const r of rows.rows) add(r.wallet, r.s || "0");
   }
 
   return map;
