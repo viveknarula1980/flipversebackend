@@ -490,7 +490,7 @@ router.get("/chest/weekly/eligibility", async (req, res) => {
       );
       if (!rows.length) {
         ok = false;
-        message = "Requires 7 consecutive daily chest claims.";
+        reason = "Requires 7 consecutive daily chest claims.";
         break;
       }
     }
