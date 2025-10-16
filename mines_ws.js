@@ -52,8 +52,12 @@ function i32(x) { const n = Number(x); return Number.isFinite(n) ? (n | 0) : 0; 
 function sha256Hex(buf) { return crypto.createHash("sha256").update(buf).digest("hex"); }
 function minesChecksum(nonce) { return Number((BigInt(nonce) % 251n) + 1n) & 0xff; }
 
-// ---------- provably fair bombs ----------
-function deriveBombs({ rows, cols, mines, playerPk, nonce, firstSafeIndex, serverSeed, clientSeed }) {
+// ---------- provably fair bombs (NO first-click safety) ----------
+/**
+ * Deterministic bomb placement using HMAC(serverSeed, playerPk | nonce | clientSeed).
+ * IMPORTANT: Does NOT exclude the first clicked index — first click can be a bomb.
+ */
+function deriveBombs({ rows, cols, mines, playerPk, nonce, serverSeed, clientSeed }) {
   const total = rows * cols;
   if (!serverSeed) throw new Error("serverSeed required for deriveBombs");
 
@@ -70,8 +74,7 @@ function deriveBombs({ rows, cols, mines, playerPk, nonce, firstSafeIndex, serve
     const rng = crypto.createHmac("sha256", seedKey).update(Buffer.from(String(i++))).digest();
     const n = ((rng[0] << 24) | (rng[1] << 16) | (rng[2] << 8) | rng[3]) >>> 0;
     const idx = n % total;
-    if (idx === firstSafeIndex) continue;
-    picked.add(idx);
+    picked.add(idx); // no exclusion
   }
   return picked;
 }
@@ -139,7 +142,7 @@ async function dbInsertLockedRow(ctx, txSig, mode) {
     push("cols", ctx.cols);
     push("mines", ctx.mines);
     if (hasCol("server_seed_hash")) push("server_seed_hash", ctx.serverSeedHash);
-    if (hasCol("server_seed")) push("server_seed", ctx.serverSeed?.toString("hex") || null);
+    // SECURITY: do NOT persist server_seed here; only reveal on resolve
     if (hasCol("client_seed")) push("client_seed", ctx.clientSeed || "");
     if (hasCol("first_hmac_hex")) push("first_hmac_hex", ctx.firstHmacHex || null);
     if (hasCol("rtp_bps")) push("rtp_bps", Number(ctx.rtpBps || 10000));
@@ -160,22 +163,14 @@ async function dbInsertLockedRow(ctx, txSig, mode) {
   }
 }
 
-async function dbUpdateOpened(nonce, openedSet, firstSafeIndex) {
+async function dbUpdateOpened(nonce, openedSet) {
   try {
     if (!DB?.pool?.query) return;
     await ensureCols();
 
     if (!hasCol("opened_json")) return; // nothing to persist
-    const cols = ["opened_json"];
-    const vals = ["$2"];
-    const params = [BigInt(nonce), JSON.stringify(Array.from(openedSet).sort((a, b) => a - b))];
-    if (hasCol("first_safe_index")) {
-      cols.push("first_safe_index");
-      vals.push("$3");
-      params.push(firstSafeIndex ?? null);
-    }
-    const sql = `update mines_rounds set ${cols.map((c, idx) => `${c}=${vals[idx]}`).join(", ")} where nonce=$1`;
-    await DB.pool.query(sql, params);
+    const sql = `update mines_rounds set opened_json=$2 where nonce=$1`;
+    await DB.pool.query(sql, [BigInt(nonce), JSON.stringify(Array.from(openedSet).sort((a, b) => a - b))]);
   } catch (e) {
     console.warn("[mines] update opened warn:", e?.message || e);
   }
@@ -293,7 +288,7 @@ function attachMinesRoutes(app) {
   console.log("[mines] HTTP routes mounted at /mines and /api/mines");
 }
 
-// ---------- WebSocket attach (unchanged game logic) ----------
+// ---------- WebSocket attach (no first-click guarantee) ----------
 function attachMines(io) {
   io.on("connection", (socket) => {
     socket.on("register", ({ player }) => { socket.data.player = String(player || "guest"); });
@@ -362,6 +357,7 @@ function attachMines(io) {
           serverSeedHash,
           clientSeed: clientSeed || "",
           firstHmacHex,
+          // no first-click pinning
           firstSafeIndex: null,
         };
 
@@ -445,6 +441,7 @@ function attachMines(io) {
         if (!ctx && DB?.pool?.query) {
           try {
             await ensureCols();
+            // Note: server_seed is NOT stored pre-resolve anymore; round resume after process restart may not be possible without external seed store.
             const q = await DB.pool.query(`select * from mines_rounds where nonce=$1 limit 1`, [BigInt(nonce)]);
             const w = q.rows[0] || null;
             if (w) {
@@ -461,12 +458,13 @@ function attachMines(io) {
                 over: w.status === "resolved",
                 nonce: Number(w.nonce),
                 expiryUnix: Number(w.expiry_unix || 0),
+                // serverSeed may be NULL now; only hash is stored. Without in-memory ctx this round can't continue safely.
                 serverSeed: w.server_seed ? Buffer.from(w.server_seed, "hex") : null,
                 serverSeedHash: w.server_seed_hash || null,
                 clientSeed: w.client_seed || "",
                 pending: w.pending_round || w.pending_mines_round || null,
                 firstHmacHex: w.first_hmac_hex || null,
-                firstSafeIndex: w.first_safe_index != null ? Number(w.first_safe_index) : null,
+                firstSafeIndex: null,
               };
               rounds.set(Number(nonce), ctx);
             }
@@ -496,11 +494,9 @@ function attachMines(io) {
           }
           if (!ctx.serverSeed) throw new Error("serverSeed missing for round (cannot derive bombs)");
 
-          ctx.firstSafeIndex = idx;
           ctx.bombs = deriveBombs({
             rows: ctx.rows, cols: ctx.cols, mines: ctx.mines,
             playerPk: ctx.playerPk, nonce: Number(nonce),
-            firstSafeIndex: ctx.firstSafeIndex,
             serverSeed: ctx.serverSeed,
             clientSeed: ctx.clientSeed || "",
           });
@@ -564,7 +560,7 @@ function attachMines(io) {
             await connection.confirmTransaction(txSig, "confirmed");
           }
 
-          await dbUpdateOpened(ctx.nonce, ctx.opened, ctx.firstSafeIndex);
+          await dbUpdateOpened(ctx.nonce, ctx.opened);
           await dbResolve(ctx.nonce, 0, txSig, serverSeedHex);
           try {
             await DB.recordGameRound?.({
@@ -583,13 +579,13 @@ function attachMines(io) {
             atStep: ctx.opened.size,
             rows: ctx.rows, cols: ctx.cols, mines: ctx.mines,
             opened: openedArr,
-            firstSafeIndex: ctx.firstSafeIndex,
+            firstSafeIndex: null, // no first-click guarantee
             bombIndices,
             serverSeedHex,
             serverSeedHash: ctx.serverSeedHash || recomputedHash,
             clientSeed: ctx.clientSeed || "",
             firstHmacHex: firstHmac,
-            formula: "HMAC_SHA256(serverSeed, playerPubKey + nonce + clientSeed) -> deterministic tiles selection (first click safe)",
+            formula: "HMAC_SHA256(serverSeed, playerPubKey + nonce + clientSeed) -> deterministic tiles (NO first-click safety).",
           };
 
           socket.emit("mines:boom", payload);
@@ -601,7 +597,7 @@ function attachMines(io) {
 
         // safe tile
         ctx.opened.add(idx);
-        await dbUpdateOpened(ctx.nonce, ctx.opened, ctx.firstSafeIndex);
+        await dbUpdateOpened(ctx.nonce, ctx.opened);
 
         const totalTiles = ctx.rows * ctx.cols;
         const mult = multiplierFor(ctx.opened.size, totalTiles, ctx.mines, ctx.rtpBps);
@@ -624,9 +620,6 @@ function attachMines(io) {
         }
 
         if (!ctx.bombs) {
-          const firstSafeIndex = ctx.opened.size > 0 ? [...ctx.opened][0] : 0;
-          ctx.firstSafeIndex = ctx.firstSafeIndex ?? firstSafeIndex;
-
           if (!ctx.serverSeed && DB?.pool?.query) {
             try {
               const q = await DB.pool.query(`select server_seed from mines_rounds where nonce=$1 limit 1`, [BigInt(nonce)]);
@@ -639,7 +632,6 @@ function attachMines(io) {
           ctx.bombs = deriveBombs({
             rows: ctx.rows, cols: ctx.cols, mines: ctx.mines,
             playerPk: ctx.playerPk, nonce: Number(nonce),
-            firstSafeIndex: ctx.firstSafeIndex,
             serverSeed: ctx.serverSeed,
             clientSeed: ctx.clientSeed || "",
           });
@@ -715,7 +707,7 @@ function attachMines(io) {
         const bombIndices = Array.from(ctx.bombs).sort((a, b) => a - b);
         const openedArr = Array.from(ctx.opened).sort((a, b) => a - b);
 
-        await dbUpdateOpened(ctx.nonce, ctx.opened, ctx.firstSafeIndex);
+        await dbUpdateOpened(ctx.nonce, ctx.opened);
         await dbResolve(ctx.nonce, payoutGross, txSig, serverSeedHex);
         try {
           await DB.recordGameRound?.({
@@ -736,13 +728,13 @@ function attachMines(io) {
           tx: txSig,
           rows: ctx.rows, cols: ctx.cols, mines: ctx.mines,
           opened: openedArr,
-          firstSafeIndex: ctx.firstSafeIndex,
+          firstSafeIndex: null, // no first-click guarantee
           bombIndices,
           serverSeedHex,
           serverSeedHash: ctx.serverSeedHash || recomputedHash,
           clientSeed: ctx.clientSeed || "",
           firstHmacHex: firstHmac,
-          formula: "HMAC_SHA256(serverSeed, playerPubKey + nonce + clientSeed) -> deterministic tiles selection (first click safe)",
+          formula: "HMAC_SHA256(serverSeed, playerPubKey + nonce + clientSeed) -> deterministic tiles (NO first-click safety).",
         };
 
         socket.emit("mines:resolved", payload);
