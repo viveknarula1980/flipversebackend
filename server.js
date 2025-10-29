@@ -90,13 +90,22 @@ function getClientIp(req) {
   return xf || req.ip || req.connection?.remoteAddress || "";
 }
 
+// ---------- USDT conversion helpers ----------
 const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "https://api.zoggy.io";
 const PORT = Number(process.env.PORT || 4000);
 
-// ---------- Price helper (SOL→USDT) ----------
+// Build absolute /maintenance URL for redirects
+function buildMaintenanceUrl(redirectUrl) {
+  const r = String(redirectUrl || "/maintenance");
+  if (/^https?:\/\//i.test(r)) return r;
+  const base = SITE_URL.replace(/\/$/, "");
+  return base + (r.startsWith("/") ? r : "/" + r);
+}
+
 const USD_PER_SOL_FALLBACK = Number(process.env.USD_PER_SOL || 200);
 let _priceCache = { t: 0, v: USD_PER_SOL_FALLBACK };
+
 async function getSolUsd() {
   try {
     if (Date.now() - _priceCache.t < 30_000 && _priceCache.v > 0) return _priceCache.v;
@@ -127,6 +136,41 @@ async function getSolUsd() {
   } catch {
     return USD_PER_SOL_FALLBACK;
   }
+}
+
+const round2 = (x) => Math.round((Number(x) + Number.EPSILON) * 100) / 100;
+const solToUsd = (sol, price) => round2(Number(sol) * Number(price || USD_PER_SOL_FALLBACK));
+const lamportsToUsd = (lamports, price) =>
+  round2((Number(lamports) / LAMPORTS_PER_SOL) * Number(price || USD_PER_SOL_FALLBACK));
+
+// ---------- Classifiers (result buckets) ----------
+function classifyTxn(row) {
+  const t = String(row.type || "").toLowerCase();
+  const status = String(row.status || "").toLowerCase();
+
+  if (t === "deposit") return "deposit";
+  if (t === "withdraw") return "withdraw";
+  if (status === "refunded" || status === "cancelled") return "refund";
+  if (t === "bet") return "bet";
+
+  const amount = Number(row.amount || 0); // stake (SOL)
+  const payout = Number(row.payout || 0); // payout (SOL)
+  const net = payout - amount;
+  if (net > 0) return "win";
+  if (net < 0) return "loss";
+  return "push";
+}
+function classifyActivity(r) {
+  const a = String(r.action || "").toLowerCase();
+  const amt = Number(r.amount || 0); // often SOL, may be signed
+  if (a.includes("deposit")) return "deposit";
+  if (a.includes("withdraw")) return "withdraw";
+  if (a.includes("win")) return "win";
+  if (a.includes("freeze") || a.includes("bet")) return "bet";
+  if (a.includes("settle")) return amt > 0 ? "win" : "loss";
+  if (amt > 0) return "credit";
+  if (amt < 0) return "debit";
+  return "other";
 }
 
 // ---------- PDA helpers (live balance) ----------
@@ -338,6 +382,65 @@ async function selectProjectionCoinflip() {
   ].join(", ");
 }
 
+// ---------- Maintenance helpers (global, cached) ----------
+const _maintCache = { t: 0, cfg: null };
+function baseMaintCfg() {
+  return {
+    isEnabled: false,
+    message: "Site is undergoing scheduled maintenance. We'll be back shortly.",
+    scheduledStart: null,
+    scheduledEnd: null,
+    allowAdminAccess: true,
+    redirectUrl: "/maintenance",
+    notifyUsers: true,
+    notificationMinutes: 30,
+  };
+}
+async function getMaintCached() {
+  const now = Date.now();
+  if (_maintCache.cfg && now - _maintCache.t < 3000) return _maintCache.cfg;
+  try {
+    const { rows } = await db.pool.query(
+      `select value from admin_settings where key = 'maintenance' limit 1`
+    );
+    const stored = rows[0]?.value || {};
+    _maintCache.cfg = Object.assign(baseMaintCfg(), stored);
+    _maintCache.t = now;
+    return _maintCache.cfg;
+  } catch {
+    _maintCache.cfg = baseMaintCfg();
+    _maintCache.t = now;
+    return _maintCache.cfg;
+  }
+}
+function isWindowActive(cfg) {
+  const now = Date.now();
+  const st = cfg.scheduledStart ? Date.parse(cfg.scheduledStart) : NaN;
+  const en = cfg.scheduledEnd ? Date.parse(cfg.scheduledEnd) : NaN;
+  let active = Boolean(cfg.isEnabled);
+  if (Number.isFinite(st) && now >= st && (!Number.isFinite(en) || now < en)) active = true;
+  if (Number.isFinite(en) && now >= en && !cfg.isEnabled) active = false;
+  return active;
+}
+function isAdminAuthorized(req) {
+  if (!process.env.ADMIN_API_KEY) return false;
+  const auth = String(req.headers["authorization"] || "");
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  return !!(m && m[1] === process.env.ADMIN_API_KEY);
+}
+function wantsHtml(req) {
+  const a = String(req.headers["accept"] || "");
+  return a.includes("text/html");
+}
+function computeRetryAfterSeconds(cfg) {
+  const now = Date.now();
+  const en = cfg.scheduledEnd ? Date.parse(cfg.scheduledEnd) : NaN;
+  if (Number.isFinite(en) && en > now) {
+    return Math.max(1, Math.floor((en - now) / 1000));
+  }
+  return 300;
+}
+
 async function main() {
   try {
     if (db.ensureSchema) await db.ensureSchema();
@@ -395,6 +498,69 @@ async function main() {
       plinko_program: PLINKO_PROGRAM_ID || null,
       coinflip_program: COINFLIP_PROGRAM_ID || null,
     });
+  });
+
+  // =======================
+  // Maintenance Enforcement (global)
+  // =======================
+  app.use(async (req, res, next) => {
+    try {
+      const p = req.path || req.url || "";
+
+      // Always allow these paths
+      if (
+        p.startsWith("/admin") ||            // admin endpoints will still be protected by their own middleware
+        p.startsWith("/health") ||
+        p.startsWith("/uploads") ||
+        p.startsWith("/socket.io") ||        // Socket.IO HTTP transport; WS gate handles enforcement
+        p.startsWith("/r/") ||
+        p.startsWith("/maintenance/status")
+      ) {
+        return next();
+      }
+
+      const cfg = await getMaintCached();
+      const active = isWindowActive(cfg);
+      res.setHeader("x-maintenance-active", String(active));
+
+      if (!active) return next();
+
+      // Allow admin override by token even outside /admin (e.g., ad-hoc checks)
+      if (cfg.allowAdminAccess && isAdminAuthorized(req)) return next();
+
+      const retryAfter = String(computeRetryAfterSeconds(cfg));
+
+      if (req.method === "GET" && wantsHtml(req)) {
+        res.setHeader("Retry-After", retryAfter);
+        return res.status(302).redirect(buildMaintenanceUrl(cfg.redirectUrl));
+      }
+
+      res.setHeader("Retry-After", retryAfter);
+      return res.status(503).json({
+        maintenance: true,
+        message: cfg.message || "Site is under maintenance.",
+        scheduledStart: cfg.scheduledStart || null,
+        scheduledEnd: cfg.scheduledEnd || null,
+      });
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  // Small public status endpoint (frontend can poll)
+  app.get("/maintenance/status", async (_req, res) => {
+    try {
+      const cfg = await getMaintCached();
+      return res.json({
+        active: isWindowActive(cfg),
+        message: cfg.message || "",
+        scheduledStart: cfg.scheduledStart || null,
+        scheduledEnd: cfg.scheduledEnd || null,
+        redirectUrl: buildMaintenanceUrl(cfg.redirectUrl),
+      });
+    } catch (e) {
+      return res.status(500).json({ error: String(e?.message || e) });
+    }
   });
 
   // ---------- Public rules ----------
@@ -486,6 +652,8 @@ async function main() {
   async function computeGameMetrics() {
     const out = Object.create(null);
     try {
+      const livePx = await getSolUsd();
+
       const gr = await db.pool.query(
         `select game_key,
                 coalesce(sum(stake_lamports - payout_lamports),0)::text as rev,
@@ -495,8 +663,7 @@ async function main() {
       );
       for (const r of gr.rows) {
         out[r.game_key] = out[r.game_key] || { revenue: 0, plays: 0 };
-        out[r.game_key].revenue +=
-          (Number(r.rev) / 1e9) * Number(process.env.USD_PER_SOL || 200);
+        out[r.game_key].revenue += (Number(r.rev) / 1e9) * livePx;
         out[r.game_key].plays += Number(r.plays || 0);
       }
 
@@ -507,8 +674,7 @@ async function main() {
            from coinflip_matches`
         );
         out["coinflip"] = out["coinflip"] || { revenue: 0, plays: 0 };
-        out["coinflip"].revenue +=
-          (Number(cf.rows[0].rev || 0) / 1e9) * Number(process.env.USD_PER_SOL || 200);
+        out["coinflip"].revenue += (Number(cf.rows[0].rev || 0) / 1e9) * livePx;
         out["coinflip"].plays += Number(cf.rows[0].plays || 0);
       }
 
@@ -519,8 +685,7 @@ async function main() {
            from slots_spins`
         );
         const revLamports = Number(ss.rows[0].rev_lamports || 0);
-        const revSol = revLamports / 1e9;
-        const usd = revSol * Number(process.env.USD_PER_SOL || 200);
+        const usd = (revLamports / 1e9) * livePx;
         out["slots"] = out["slots"] || { revenue: 0, plays: 0 };
         out["slots"].revenue += usd;
         out["slots"].plays += Number(ss.rows[0].plays || 0);
@@ -605,10 +770,26 @@ async function main() {
     }
   });
 
+  // ---------- Admin stats (recentActivity amounts -> USDT) ----------
   app.get("/admin/stats", async (_req, res) => {
     try {
       const stats = await db.getAdminStats();
-      res.json(stats);
+      const px = await getSolUsd();
+
+      const recent = Array.isArray(stats.recentActivity)
+        ? stats.recentActivity.map((a) => {
+            const amountSol = Number(a.amount || 0);
+            return {
+              ...a,
+              result: classifyActivity({ action: a.action, amount: amountSol }),
+              amount: solToUsd(amountSol, px),
+              currency: "USDT",
+              priceUsdPerSol: px,
+            };
+          })
+        : [];
+
+      res.json({ ...stats, recentActivity: recent });
     } catch (e) {
       res.status(500).json({ error: e?.message || String(e) });
     }
@@ -629,7 +810,7 @@ async function main() {
       const users = await Promise.all(
         data.users.map(async (u) => {
           const liveLamports = await fetchLivePdaLamports(u.walletAddress);
-          const lam = liveLamports != null ? liveLamports : Number(u.pdaBalance || 0); // pdaBalance==lamports from DB
+          const lam = liveLamports != null ? liveLamports : Number(u.pdaBalance || 0);
           const usdt = (lam / 1e9) * price;
 
           return {
@@ -667,11 +848,26 @@ async function main() {
     }
   });
 
+  // Admin view: user's activities (USDT + classification)
   app.get("/admin/users/:id/activities", async (req, res) => {
     try {
       const id = String(req.params.id);
-      const rows = await db.listUserActivities(id, Number(req.query.limit || 50));
-      res.json(rows);
+      const limit = Number(req.query.limit || 50);
+      const rows = await db.listUserActivities(id, limit);
+      const px = await getSolUsd();
+
+      const out = rows.map((r) => {
+        const amountSol = Number(r.amount || 0);
+        return {
+          ...r,
+          result: classifyActivity(r),
+          amount: solToUsd(amountSol, px),
+          currency: "USDT",
+          priceUsdPerSol: px,
+        };
+      });
+
+      res.json(out);
     } catch (e) {
       res.status(500).json({ error: e?.message || String(e) });
     }
@@ -746,6 +942,7 @@ async function main() {
   });
 
   // ---------------- Admin APIs (Transactions) ----------------
+  // List (USDT + result filter)
   app.get("/admin/transactions", async (req, res) => {
     try {
       const {
@@ -755,6 +952,7 @@ async function main() {
         status = "all",
         game = "all",
         search = "",
+        result = "all",
       } = req.query || {};
 
       const data = await db.listTransactions({
@@ -765,12 +963,37 @@ async function main() {
         game: String(game),
         search: String(search),
       });
-      res.json(data);
+
+      const livePx = await getSolUsd();
+      const want = String(result).toLowerCase().split(",").filter(Boolean);
+
+      let txs = (data.transactions || []).map((t) => {
+        const cls = classifyTxn(t);
+        const px = Number(t.price_usd_per_sol || livePx);
+        const amountUsdt = solToUsd(t.amount || 0, px);
+        const payoutUsdt = solToUsd(t.payout || 0, px);
+        return {
+          ...t,
+          result: cls,
+          amount: amountUsdt,
+          payout: payoutUsdt,
+          netUsdt: round2(payoutUsdt - amountUsdt),
+          currency: "USDT",
+          priceUsdPerSol: px,
+        };
+      });
+
+      if (want.length && !want.includes("all")) {
+        txs = txs.filter((t) => want.includes(t.result));
+      }
+
+      res.json({ ...data, transactions: txs });
     } catch (e) {
       res.status(500).json({ error: e?.message || String(e) });
     }
   });
 
+  // Aggregate stats (unchanged)
   app.get("/admin/transactions/stats", async (_req, res) => {
     try {
       const stats = await db.getTransactionStats();
@@ -780,18 +1003,40 @@ async function main() {
     }
   });
 
+  // Export CSV (USDT + result column)
   app.get("/admin/transactions/export", async (req, res) => {
     try {
-      const { type = "all", status = "all", game = "all", search = "" } = req.query || {};
+      const { type = "all", status = "all", game = "all", search = "", result = "all" } = req.query || {};
 
-      const data = await db.listTransactions({
+    const data = await db.listTransactions({
         page: 1,
-        limit: 1000000,
+        limit: 1_000_000,
         type: String(type),
         status: String(status),
         game: String(game),
         search: String(search),
       });
+
+      const livePx = await getSolUsd();
+      const want = String(result).toLowerCase().split(",").filter(Boolean);
+
+      let rows = (data.transactions || []).map((t) => {
+        const cls = classifyTxn(t);
+        const px = Number(t.price_usd_per_sol || livePx);
+        const amountUsdt = solToUsd(t.amount || 0, px);
+        const payoutUsdt = solToUsd(t.payout || 0, px);
+        return {
+          ...t,
+          result: cls,
+          amountUsdt,
+          payoutUsdt,
+          priceUsdPerSol: px,
+        };
+      });
+
+      if (want.length && !want.includes("all")) {
+        rows = rows.filter((t) => want.includes(t.result));
+      }
 
       const header = [
         "id",
@@ -799,33 +1044,35 @@ async function main() {
         "walletAddress",
         "type",
         "game",
-        "amount",
+        "amount_usdt",
         "currency",
         "status",
         "timestamp",
-        "payout",
+        "payout_usdt",
+        "result",
+        "price_usd_per_sol",
       ].join(",");
-      const lines = data.transactions.map((t) =>
+
+      const lines = rows.map((t) =>
         [
           t.id,
           JSON.stringify(t.username || ""),
           JSON.stringify(t.walletAddress || ""),
           t.type || "",
           t.game || "",
-          t.amount ?? 0,
-          t.currency || "SOL",
+          Number.isFinite(t.amountUsdt) ? t.amountUsdt : 0,
+          "USDT",
           t.status || "",
           t.timestamp || "",
-          t.payout ?? 0,
+          Number.isFinite(t.payoutUsdt) ? t.payoutUsdt : 0,
+          t.result || "",
+          t.priceUsdPerSol || livePx,
         ].join(",")
       );
-      const csv = [header].concat(lines).join("\n");
 
+      const csv = [header].concat(lines).join("\n");
       res.setHeader("Content-Type", "text/csv; charset=utf-8");
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="transactions_export.csv"`
-      );
+      res.setHeader("Content-Disposition", `attachment; filename="transactions_export.csv"`);
       res.send(csv);
     } catch (e) {
       res.status(500).json({ error: e?.message || String(e) });
@@ -930,12 +1177,26 @@ async function main() {
     }
   });
 
+  // Public wallet activities (USDT view)
   app.get("/wallets/:id/activities", async (req, res) => {
     try {
       const id = String(req.params.id);
       const limit = Number(req.query.limit || 100);
       const rows = await db.listUserActivities(id, limit);
-      res.json(rows);
+      const px = await getSolUsd();
+
+      const out = rows.map((r) => {
+        const amountSol = Number(r.amount || 0);
+        return {
+          ...r,
+          result: classifyActivity(r),
+          amount: solToUsd(amountSol, px),
+          currency: "USDT",
+          priceUsdPerSol: px,
+        };
+      });
+
+      res.json(out);
     } catch (e) {
       res.status(500).json({ error: e?.message || String(e) });
     }
@@ -1199,6 +1460,25 @@ async function main() {
     }
   });
 
+  // MAINTENANCE GATE (block sockets unless admin)
+  io.use(async (socket, next) => {
+    try {
+      const cfg = await getMaintCached();
+      const active = isWindowActive(cfg);
+      if (!active) return next();
+
+      // Admin bypass via Authorization header or handshake auth
+      const hdrToken = String(socket.handshake?.headers?.authorization || "").replace(/^Bearer\s+/i, "");
+      const authToken = socket.handshake?.auth?.adminToken || hdrToken || "";
+      if (cfg.allowAdminAccess && process.env.ADMIN_API_KEY && authToken === process.env.ADMIN_API_KEY) {
+        return next();
+      }
+      return next(new Error("MAINTENANCE_MODE"));
+    } catch (e) {
+      return next(e);
+    }
+  });
+
   let solanaAnchorIx = null;
   try {
     solanaAnchorIx = require("./solana_anchor_ix");
@@ -1323,7 +1603,7 @@ async function main() {
           ? mod[attachName]
           : null;
 
-    if (fn) {
+      if (fn) {
         fn(io);
         console.log(`${name} WS mounted`);
       } else {
@@ -1346,7 +1626,6 @@ async function main() {
   }
 
   // ---------- COINFLIP REST (/coinflip/resolved) ----------
-  // Returns coinflip matches involving a given wallet, newest first, cursor-paginated.
   app.get("/coinflip/resolved", async (req, res) => {
     try {
       const wallet = String(req.query.wallet || "");
@@ -1410,53 +1689,53 @@ async function main() {
   });
 
   // Other WS modules
-try {
-  const slots = require("./slots_ws");
-  slots.attachSlots(io);           // WS
-  slots.attachSlotsRoutes(app);    // HTTP: /slots and /api/slots
-  console.log("Slots WS + HTTP mounted");
-} catch (e) {
-  console.warn("slots_ws not found / failed to mount:", e?.message || e);
-}
-
-try {
-  const crash = require("./crash_ws");
-  await crash.ensureCrashSchema?.().catch(() => {});
-  crash.attachCrash?.(io, app);
-  console.log("Crash WS + routes mounted");
-} catch (e) {
-  console.warn("Crash mount failed:", e?.message || e);
-}
-try {
-  const plinko = require("./plinko_ws");
-  await plinko.ensurePlinkoSchema?.().catch(() => {});
-  plinko.attachPlinko?.(io, app);   // mounts WS + REST (/plinko/resolved)
-  console.log("Plinko WS + routes mounted");
-} catch (e) {
-  console.warn("Plinko mount failed:", e?.message || e);
-}// Dice: already mounted above with io + app
-
-// Coinflip: mount WS + REST and ensure schema
-try {
-  const coinflip = require("./coinflip_ws");
-  await coinflip.ensureCoinflipSchema?.().catch(() => {});
-  coinflip.attachCoinflip?.(io, app);
-  console.log("Coinflip WS + routes mounted");
-} catch (e) {
-  console.warn("Coinflip mount failed:", e?.message || e);
-}
-
- try {
-  const mines = require("./mines_ws");
-  mines.attachMines(io);
-  console.log("Mines WS mounted");
-  if (typeof mines.attachMinesRoutes === "function") {
-    mines.attachMinesRoutes(app);
+  try {
+    const slots = require("./slots_ws");
+    slots.attachSlots(io);           // WS
+    slots.attachSlotsRoutes(app);    // HTTP: /slots and /api/slots
+    console.log("Slots WS + HTTP mounted");
+  } catch (e) {
+    console.warn("slots_ws not found / failed to mount:", e?.message || e);
   }
-} catch (e) {
-  console.warn("mines_ws not found / failed to mount:", e?.message || e);
-}
 
+  try {
+    const crash = require("./crash_ws");
+    await crash.ensureCrashSchema?.().catch(() => {});
+    crash.attachCrash?.(io, app);
+    console.log("Crash WS + routes mounted");
+  } catch (e) {
+    console.warn("Crash mount failed:", e?.message || e);
+  }
+  try {
+    const plinko = require("./plinko_ws");
+    await plinko.ensurePlinkoSchema?.().catch(() => {});
+    plinko.attachPlinko?.(io, app);   // mounts WS + REST (/plinko/resolved)
+    console.log("Plinko WS + routes mounted");
+  } catch (e) {
+    console.warn("Plinko mount failed:", e?.message || e);
+  }
+  // Dice: already mounted above with io + app
+
+  // Coinflip: mount WS + REST and ensure schema
+  try {
+    const coinflip = require("./coinflip_ws");
+    await coinflip.ensureCoinflipSchema?.().catch(() => {});
+    coinflip.attachCoinflip?.(io, app);
+    console.log("Coinflip WS + routes mounted");
+  } catch (e) {
+    console.warn("Coinflip mount failed:", e?.message || e);
+  }
+
+  try {
+    const mines = require("./mines_ws");
+    mines.attachMines(io);
+    console.log("Mines WS mounted");
+    if (typeof mines.attachMinesRoutes === "function") {
+      mines.attachMinesRoutes(app);
+    }
+  } catch (e) {
+    console.warn("mines_ws not found / failed to mount:", e?.message || e);
+  }
 
   console.log("DATABASE_URL =", process.env.DATABASE_URL);
 

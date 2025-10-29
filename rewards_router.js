@@ -778,7 +778,7 @@ router.get("/leaderboard/top", async (req, res) => {
         current_level_number: lvl?.level_number ?? null,
         current_level_title: lvl?.level_title ?? null,
         current_range_name: lvl?.range_name ?? null,
-        current_level_label: lvl?.range_name && lvl?.level_title ? `${lvl.range_name} - ${lvl.level_title}` : "UNRANKED",
+        current_level_label: lvl?.range_name && lvl?.level_title ? `${lvl.range_name} - ${lvl.level_title}` : "Unranked",
       };
     });
 

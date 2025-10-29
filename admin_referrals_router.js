@@ -1,7 +1,9 @@
-// admin_referrals_router.js
+// backend/admin_referrals_router.js
 const express = require("express");
 const router = express.Router();
 const db = require("./db");
+
+const { depositBonusToVault } = require("./bonus_transfer"); // <<< NEW: on-chain credit
 
 const USD_PER_SOL = Number(process.env.USD_PER_SOL || 200);
 const SITE_URL =
@@ -302,6 +304,14 @@ router.post("/payouts/auto-trigger", async (_req, res) => {
   }
 });
 
+/**
+ * PUT /payouts/:id
+ * - approve: if SOL → on-chain credit to user vault PDA via depositBonusToVault(), mark completed+tx_hash
+ *            if non-SOL → mark approved (manual settlement later)
+ * - reject: mark rejected
+ * - processing: move to processing (optionally store tx_hash)
+ * - complete: mark completed (+tx_hash)
+ */
 router.put("/payouts/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -309,29 +319,106 @@ router.put("/payouts/:id", async (req, res) => {
     if (!["approve", "reject", "complete", "processing"].includes(action))
       return res.status(400).json({ error: "invalid action" });
 
+    // Load the payout row
+    const { rows } = await db.pool.query(
+      `select id, affiliate_code, affiliate_wallet, amount_lamports, network, status
+         from affiliate_payout_requests
+        where id=$1`,
+      [id]
+    );
+    const p = rows[0];
+    if (!p) return res.status(404).json({ error: "payout not found" });
+
+    const current = p.status;
+    const net = (network || p.network || "SOL").toUpperCase();
+
     if (action === "approve") {
+      if (current !== "pending")
+        return res.status(409).json({ error: `cannot approve from status=${current}` });
+
+      // Move to processing so balance is considered locked
       await db.pool.query(
-        `update affiliate_payout_requests set status='approved', network=coalesce($2,network), notes=coalesce($3,notes) where id=$1`,
-        [id, network || null, notes || null]
+        `update affiliate_payout_requests set status='processing', network=$2, notes=coalesce($3,notes) where id=$1`,
+        [id, net, notes || null]
       );
-    } else if (action === "reject") {
+
+      // For SOL network: send lamports → user vault PDA (on-chain)
+      if (net === "SOL") {
+        try {
+          const { txSig } = await depositBonusToVault({
+            userWallet: p.affiliate_wallet,
+            lamports: p.amount_lamports,
+          });
+
+          await db.pool.query(
+            `update affiliate_payout_requests
+                set status='completed', tx_hash=$2, processed_at=now(), notes=coalesce($3,notes)
+              where id=$1`,
+            [id, txSig, notes || null]
+          );
+          return res.json({ ok: true, status: "completed", txHash: txSig });
+        } catch (err) {
+          // Roll back to pending if chain transfer failed
+          const message = err?.message || String(err);
+          await db.pool.query(
+            `update affiliate_payout_requests
+                set status='pending', notes=concat(coalesce(notes,''), $2)
+              where id=$1`,
+            [id, `\n[approve->SOL failed] ${message}`.slice(0, 500)]
+          );
+
+          // Special case: vault not activated (user never opened site)
+          if (err && (err.code === "VAULT_NOT_ACTIVATED" || /vault-not-activated/i.test(message))) {
+            return res.status(409).json({
+              error: "vault_not_activated",
+              details: { userWallet: p.affiliate_wallet },
+            });
+          }
+
+          return res.status(500).json({ error: "onchain_transfer_failed", details: message });
+        }
+      }
+
+      // Non-SOL network: leave as approved (manual settlement later)
+      await db.pool.query(
+        `update affiliate_payout_requests set status='approved', processed_at=null, notes=coalesce($2,notes) where id=$1`,
+        [id, notes || null]
+      );
+      return res.json({ ok: true, status: "approved" });
+    }
+
+    if (action === "reject") {
+      if (!["pending", "approved", "processing"].includes(current)) {
+        return res.status(409).json({ error: `cannot reject from status=${current}` });
+      }
       await db.pool.query(
         `update affiliate_payout_requests set status='rejected', processed_at=now(), notes=coalesce($2,notes) where id=$1`,
         [id, notes || null]
       );
-    } else if (action === "processing") {
-      await db.pool.query(
-        `update affiliate_payout_requests set status='processing', tx_hash=coalesce($2,tx_hash), processed_at=null where id=$1`,
-        [id, txHash || null]
-      );
-    } else if (action === "complete") {
-      await db.pool.query(
-        `update affiliate_payout_requests set status='completed', tx_hash=coalesce($2,tx_hash), processed_at=now() where id=$1`,
-        [id, txHash || null]
-      );
+      return res.json({ ok: true, status: "rejected" });
     }
 
-    res.json({ ok: true });
+    if (action === "processing") {
+      await db.pool.query(
+        `update affiliate_payout_requests
+            set status='processing', tx_hash=coalesce($2, tx_hash), processed_at=null, network=$3, notes=coalesce($4,notes)
+          where id=$1`,
+        [id, txHash || null, net, notes || null]
+      );
+      return res.json({ ok: true, status: "processing" });
+    }
+
+    if (action === "complete") {
+      await db.pool.query(
+        `update affiliate_payout_requests
+            set status='completed', processed_at=now(), tx_hash=coalesce($2,tx_hash), network=$3, notes=coalesce($4,notes)
+          where id=$1`,
+        [id, txHash || null, net, notes || null]
+      );
+      return res.json({ ok: true, status: "completed" });
+    }
+
+    res.status(400).json({ error: "unhandled action" });
   } catch (e) {
     res.status(500).json({ error: e?.message || String(e) });
   }

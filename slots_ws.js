@@ -1,10 +1,11 @@
-// slots_ws.js — provably-fair + promo/fake balance support (same pattern as dice/mines)
+// slots_ws.js — provably-fair + promo/fake balance + FREE SPINS (no-stake) support
 const crypto = require("crypto");
 const {
   PublicKey,
   VersionedTransaction,
   TransactionMessage,
   ComputeBudgetProgram,
+  SystemProgram, // ← added for free-mode payouts
 } = require("@solana/web3.js");
 
 const DB = global.db || require("./db");
@@ -120,7 +121,7 @@ function buildGridForOutcome({ rng, outcome }) {
 }
 
 function computePayoutLamports(betLamports, payoutMul, feePct) {
-  // net payout (stake is locked separately); fee is applied to stake for house rake
+  // net payout (stake is locked separately in paid mode); fee is applied to stake for house rake
   const SCALE = 1_000_000n;
   const mul = BigInt(Math.round(payoutMul * 1_000_000));
   const fee = BigInt(Math.round(feePct * 1_000_000));
@@ -150,7 +151,7 @@ const slotsChecksum = (nonce) => Number((BigInt(nonce) % 251n) + 1n) & 0xff;
  *   serverSeed: Buffer,
  *   serverSeedHash: string,
  *   feePct: number,
- *   mode: "real" | "fake"
+ *   mode: "real" | "fake" | "free"
  * }>
  */
 const slotsPending = new Map();
@@ -163,6 +164,46 @@ async function getPromoBalance(player) {
     }
   } catch (_) {}
   return null;
+}
+
+// ---------- FREE SPINS (Welcome Bonus) helpers ----------
+async function getActiveWelcomeState(wallet) {
+  try {
+    const r = await DB.pool.query(
+      `select status, fs_count, fs_value_usd, fs_max_win_usd
+         from welcome_bonus_states
+        where user_wallet=$1 and status='active'
+        order by created_at desc limit 1`,
+      [String(wallet)]
+    );
+    return r.rows[0] || null;
+  } catch { return null; }
+}
+async function consumeOneFreeSpin(wallet) {
+  try {
+    const r = await DB.pool.query(
+      `update welcome_bonus_states
+          set fs_count = GREATEST(0, fs_count - 1), updated_at = now()
+        where user_wallet=$1 and status='active' and fs_count > 0
+        returning fs_count`,
+      [String(wallet)]
+    );
+    return Number(r.rows?.[0]?.fs_count ?? 0);
+  } catch { return 0; }
+}
+async function refundFreeSpin(wallet) {
+  try {
+    await DB.pool.query(
+      `update welcome_bonus_states
+          set fs_count = fs_count + 1, updated_at = now()
+        where user_wallet=$1 and status='active'`,
+      [String(wallet)]
+    );
+  } catch {}
+}
+function usdToLamports(usd, usdPerSol = Number(process.env.USD_PER_SOL || 200)) {
+  const lamports = Math.round((Number(usd || 0) / Number(usdPerSol || 1)) * 1e9);
+  return Math.max(1, lamports);
 }
 
 // ---------- schema detection (for legacy/new DBs) ----------
@@ -328,10 +369,10 @@ function attachSlots(io) {
 
     /**
      * SLOTS PLACE
-     * in:  { player, betAmountLamports, clientSeed? }
+     * in:  { player, betAmountLamports, clientSeed?, welcomeFreeSpin? }
      * out: "slots:locked" { nonce, txSig, serverSeedHash, promoBalanceLamports? }
      */
-    socket.on("slots:place", async ({ player, betAmountLamports, clientSeed }) => {
+    socket.on("slots:place", async ({ player, betAmountLamports, clientSeed, welcomeFreeSpin }) => {
       try {
         if (!player) return socket.emit("slots:error", { code: "NO_PLAYER", message: "player required" });
 
@@ -342,22 +383,39 @@ function attachSlots(io) {
 
         const min = BigInt(cfg?.min_bet_lamports ?? 50_000n);
         const max = BigInt(cfg?.max_bet_lamports ?? 5_000_000_000n);
-        const betLamports = BigInt(betAmountLamports || 0);
-        if (betLamports <= 0n) {
-          return socket.emit("slots:error", { code: "BAD_BET", message: "betAmountLamports invalid" });
-        }
-        if (betLamports < min || betLamports > max) {
-          return socket.emit("slots:error", { code: "BET_RANGE", message: "Bet outside allowed range" });
+
+        let betLamports = BigInt(betAmountLamports || 0);
+        const isFree = Boolean(welcomeFreeSpin);
+
+        if (!isFree) {
+          if (betLamports <= 0n) {
+            return socket.emit("slots:error", { code: "BAD_BET", message: "betAmountLamports invalid" });
+          }
+          if (betLamports < min || betLamports > max) {
+            return socket.emit("slots:error", { code: "BET_RANGE", message: "Bet outside allowed range" });
+          }
+
+          // bonus/wager guard (no-op if missing)
+          await precheckOrThrow({
+            userWallet: player,
+            stakeLamports: betLamports.toString(),
+            gameKey: "slots",
+          }).catch(()=>{});
+        } else {
+          // FREE MODE: ignore min/max & bonus guards; server controls stake size
+          const st = await getActiveWelcomeState(player);
+          if (!st || Number(st.fs_count || 0) <= 0) {
+            return socket.emit("slots:error", { code: "NO_FREE_SPINS", message: "No free spins available" });
+          }
+          // if client sent 0, derive stake from configured free spin value
+          if (betLamports <= 0n) {
+            betLamports = BigInt(usdToLamports(Number(st.fs_value_usd || 0)));
+          }
+          // consume one free spin now (refund if later stage fails)
+          await consumeOneFreeSpin(player).catch(()=>{});
         }
 
-        // bonus/wager guard (no-op if missing)
-        await precheckOrThrow({
-          userWallet: player,
-          stakeLamports: betLamports.toString(),
-          gameKey: "slots",
-        }).catch(()=>{});
-
-        const useFake   = await Promo.isFakeMode(player).catch(()=>false);
+        const useFake   = isFree ? false : await Promo.isFakeMode(player).catch(()=>false);
         const playerPk  = new PublicKey(player);
         const nonce     = Date.now();
         const expiryUnix= Math.floor(Date.now()/1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
@@ -368,6 +426,29 @@ function attachSlots(io) {
 
         const feePct = getFeePctFromConfig(cfg);
         let txSig = null;
+
+        if (isFree) {
+          // ✅ FREE: no PDA lock, no promo freeze; just mark pending
+          txSig = `FREE-LOCK-${nonce}`;
+
+          slotsPending.set(nonce, {
+            player,
+            betLamports,
+            clientSeed: String(clientSeed || ""),
+            serverSeed,
+            serverSeedHash,
+            feePct,
+            mode: "free",
+          });
+
+          // persist (best-effort)
+          await dbInsertLockedRow({
+            player, betLamports, clientSeed, serverSeedHash, serverSeed, nonce, feePct, txSig
+          });
+
+          socket.emit("slots:locked", { nonce: String(nonce), txSig, serverSeedHash });
+          return;
+        }
 
         if (useFake) {
           // FAKE: freeze promo balance, no chain tx
@@ -458,6 +539,10 @@ function attachSlots(io) {
           socket.emit("slots:locked", { nonce: String(nonce), txSig, serverSeedHash });
         }
       } catch (e) {
+        // If a free spin failed at place-time, refund it
+        try {
+          if (welcomeFreeSpin) await refundFreeSpin(player);
+        } catch {}
         console.error("slots:place error:", e);
         socket.emit("slots:error", { code: "PLACE_FAIL", message: String(e?.message || e) });
       }
@@ -506,7 +591,7 @@ function attachSlots(io) {
         if (!ctx) return socket.emit("slots:error", { code: "NOT_FOUND", message: "no prepared spin for nonce" });
 
         // compute outcome
-        const { outcome, grid, payoutLamports } = computeSpin({
+        const { outcome, grid, payoutLamports: rawPayout } = computeSpin({
           serverSeed: ctx.serverSeed,
           clientSeed: ctx.clientSeed,
           nonce: Number(nonce),
@@ -514,11 +599,80 @@ function attachSlots(io) {
           feePct: ctx.feePct ?? 0.05,
         });
 
+        let payoutLamports = rawPayout;
         const checksum = slotsChecksum(nonce);
         let txSig = null;
         let promoBalance = null;
 
-        if (ctx.mode === "fake") {
+        if (ctx.mode === "free") {
+          // Optional: cap free-spin win if you want to enforce a max; uncomment if desired:
+          // const st = await getActiveWelcomeState(ctx.player).catch(()=>null);
+          // if (st?.fs_max_win_usd) {
+          //   const cap = BigInt(usdToLamports(Number(st.fs_max_win_usd)));
+          //   if (payoutLamports > cap) payoutLamports = cap;
+          // }
+
+          try {
+            if (payoutLamports > 0n) {
+              // ✅ Transfer real SOL (no prior lock) to user vault PDA
+              const userVault = deriveUserVaultPda(playerPk);
+              const feePayer = await getServerKeypair();
+              const { blockhash } = await connection.getLatestBlockhash("confirmed");
+
+              const ix = SystemProgram.transfer({
+                fromPubkey: feePayer.publicKey,
+                toPubkey: userVault,
+                lamports: Number(payoutLamports),
+              });
+
+              const msgV0 = new TransactionMessage({
+                payerKey: feePayer.publicKey,
+                recentBlockhash: blockhash,
+                instructions: [ix],
+              }).compileToV0Message();
+
+              const vtx = new VersionedTransaction(msgV0);
+              vtx.sign([feePayer]);
+
+              const sig = await connection.sendRawTransaction(vtx.serialize(), {
+                skipPreflight: false,
+                maxRetries: 5,
+              });
+              await connection.confirmTransaction(sig, "confirmed");
+              txSig = sig;
+            } else {
+              txSig = `FREE-LOSE-${nonce}`;
+            }
+
+            // bookkeeping (best-effort)
+            try {
+              await DB.recordGameRound?.({
+                game_key: "slots",
+                player,
+                nonce: Number(nonce),
+                stake_lamports: Number(ctx.betLamports),
+                payout_lamports: Number(payoutLamports),
+                result_json: { outcome: outcome.key, grid, mode: "free" },
+              });
+              if (payoutLamports > 0n) {
+                await DB.recordActivity?.({
+                  user: player,
+                  action: "Slots win (free)",
+                  amount: (Number(payoutLamports) / 1e9).toFixed(4),
+                });
+              }
+              await dbResolveUpdate({ player, nonce, grid, payoutLamports, resolveSig: txSig });
+            } catch (e) {
+              console.warn("[slots] free resolve DB warn:", e?.message || e);
+            }
+          } catch (e) {
+            console.error("FREE payout failed:", e?.message || e);
+            // If you want to refund consumed FS on payout failure, uncomment:
+            // await refundFreeSpin(player).catch(()=>{});
+            return socket.emit("slots:error", { code: "FREE_PAYOUT_FAILED", message: String(e?.message || e) });
+          }
+
+        } else if (ctx.mode === "fake") {
           // settle promo net payout
           await Promo.settleBet(player, payoutLamports.toString());
           txSig = `FAKE-RESOLVE-${nonce}`;
@@ -546,7 +700,7 @@ function attachSlots(io) {
             console.warn("[slots] fake resolve DB warn:", e?.message || e);
           }
         } else {
-          // on-chain resolve
+          // on-chain resolve (paid)
           const userVault  = deriveUserVaultPda(playerPk);
           const houseVault = deriveVaultPda();
           const adminPda   = deriveAdminPda();

@@ -4,6 +4,16 @@ const router = express.Router();
 const db = require("./db");
 const affiliateService = require("./affiliate_service")(db.pool);
 
+// ==== NEW: chain payout helper & admin guard ====
+const { depositBonusToVault, userVaultPda } = require("./bonus_transfer");
+
+function adminAuth(req, res, next) {
+  const k = String(req.headers["x-admin-key"] || "");
+  if (!process.env.ADMIN_API_KEY || k !== process.env.ADMIN_API_KEY) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  next();
+}
 
 // ---------- config & utils ----------
 const big = (v) => (v == null ? null : String(v));
@@ -76,6 +86,9 @@ const API_BASE =
   process.env.NEXT_PUBLIC_API_URL ||
   `http://localhost:${process.env.PORT || 4000}`;
 
+// ---- Payout request knobs (cooldown etc for user-initiated claims) ----
+const AFF_PAYOUT_COOLDOWN_MINUTES = Number(process.env.AFF_PAYOUT_COOLDOWN_MINUTES || 60);
+
 // ---- Bonus Milestones (configurable) ----
 // You can override with JSON via AFF_BONUS_MILESTONES_JSON
 let BONUS_MILESTONES = [];
@@ -128,6 +141,12 @@ function toLamports(sol) {
 }
 function lamportsToUsd(l) { return (Number(l) / 1e9) * USD_PER_SOL; }
 function solToUsd(sol) { return Number(sol) * USD_PER_SOL; }
+function usdToLamports(usd) {
+  const n = Number(usd);
+  if (!isFinite(n) || n <= 0) return 0n;
+  const sol = n / USD_PER_SOL;
+  return toLamports(sol);
+}
 
 function pickWeighted(prizes) {
   const total = prizes.reduce((s, p) => s + p.weight, 0);
@@ -277,6 +296,40 @@ function normalizeWallet(input) {
         created_at timestamptz not null default now(),
         unique(user_wallet, lvl)
       );
+    `);
+
+    // ---- Affiliate payouts (settings + requests) minimal ensure ----
+    await db.pool.query(`
+      create table if not exists affiliate_payout_settings (
+        id                               int primary key default 1,
+        auto_payout_enabled              boolean not null default true,
+        auto_payout_threshold_lamports   bigint  not null default 50000000,
+        auto_payout_max_amount_lamports  bigint  not null default 5000000000,
+        default_network                  text    not null default 'SOL',
+        fraud_score_threshold            numeric not null default 0.30,
+        manual_review_above_lamports     bigint  not null default 1000000000,
+        updated_at                       timestamptz not null default now()
+      );
+    `);
+    await db.pool.query(`
+      create table if not exists affiliate_payout_requests (
+        id bigserial primary key,
+        affiliate_code   text not null,
+        affiliate_wallet text not null,
+        amount_lamports  bigint not null check (amount_lamports > 0),
+        network          text not null check (network in ('SOL','USDT','ETH','BTC')),
+        status           text not null default 'pending'
+                         check (status in ('pending','approved','rejected','completed','processing')),
+        is_automatic            boolean not null default false,
+        requires_manual_review  boolean not null default false,
+        fraud_score             numeric not null default 0,
+        tx_hash                 text,
+        notes                   text,
+        requested_at            timestamptz not null default now(),
+        processed_at            timestamptz
+      );
+      create index if not exists idx_aff_payouts_code on affiliate_payout_requests(affiliate_code);
+      create index if not exists idx_aff_payouts_status on affiliate_payout_requests(status);
     `);
   } catch (e) {
     console.warn("[bootstrap ensure] failed:", e?.message || e);
@@ -966,14 +1019,14 @@ router.post("/referrals/bind", async (req, res) => {
     const code = String(req.body?.code || "").toUpperCase();
     const userWallet = normalizeWallet(req.body?.userWallet);
     const deviceId = req.body?.deviceId ? String(req.body.deviceId) : null;
-if (!code || !userWallet) return res.status(400).json({ error: "Invalid input: code and userWallet required" });
+    if (!code || !userWallet) return res.status(400).json({ error: "Invalid input: code and userWallet required" });
 
     const { rows: aff } = await db.pool.query(`select owner_wallet from affiliates where code=$1`, [code]);
     if (!aff[0]) return res.status(400).json({ error: "invalid code" });
-if (String(aff[0].owner_wallet) === String(userWallet)) return res.status(400).json({ error: "You cannot refer yourself." });
+    if (String(aff[0].owner_wallet) === String(userWallet)) return res.status(400).json({ error: "You cannot refer yourself." });
 
     const exists = await db.pool.query(`select 1 from referrals where referred_wallet=$1`, [String(userWallet)]);
-if (exists.rows.length > 0) return res.status(200).json({ ok:true, alreadyBound:true });
+    if (exists.rows.length > 0) return res.status(200).json({ ok:true, alreadyBound:true });
 
     if (deviceId) {
       await db.pool.query(
@@ -1655,15 +1708,563 @@ router.get("/affiliates/me/link", async (req,res) => {
   } catch (e) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 
+/* =========================================================================
+   NEW: Affiliate Payout balance & request endpoints (user → admin approval)
+   ======================================================================= */
+
+// Helper: load payout settings (singleton row id=1)
+async function getPayoutSettings() {
+  const { rows } = await db.pool.query(`select * from affiliate_payout_settings where id=1`);
+  const s = rows[0] || {};
+  return {
+    autoEnabled: !!(s.auto_payout_enabled ?? true),
+    thresholdLamports: BigInt(s.auto_payout_threshold_lamports ?? 50_000_000n),
+    maxAmountLamports: BigInt(s.auto_payout_max_amount_lamports ?? 5_000_000_000n),
+    defaultNetwork: String(s.default_network || "SOL"),
+    manualReviewAboveLamports: BigInt(s.manual_review_above_lamports ?? 1_000_000_000n),
+    fraudScoreThreshold: Number(s.fraud_score_threshold ?? 0.3),
+  };
+}
+
+// Helper: resolve code + status and basic guard
+async function getAffiliateForWallet(wallet) {
+  const code = await ensureAffiliateCodeForWallet(wallet);
+  const { rows } = await db.pool.query(`select code, owner_wallet, status from affiliates where code=$1`, [code]);
+  const row = rows[0];
+  if (!row) return null;
+  return { code: row.code, ownerWallet: row.owner_wallet, status: row.status || "active" };
+}
+
+// Helper: fetch available/current balance (try view, fallback to sums)
+async function getAffiliateBalancesByCode(code) {
+  try {
+    const v = await db.pool.query(`select * from v_affiliate_balances where affiliate_code=$1`, [code]);
+    if (v.rows[0]) {
+      const r = v.rows[0];
+      return {
+        lifetimeEarned: BigInt(r.lifetime_earned_lamports || 0),
+        currentBalance: BigInt(r.current_balance_lamports || 0),
+        lifetimePaid:   BigInt(r.lifetime_paid_lamports   || 0),
+      };
+    }
+  } catch (_) {
+    // ignore, fall through to manual compute
+  }
+
+  const { rows: c } = await db.pool.query(
+    `select coalesce(sum(affiliate_commission_lamports),0)::bigint as earned
+       from affiliate_commissions
+      where affiliate_code=$1`,
+    [code]
+  );
+  const { rows: p } = await db.pool.query(
+    `select
+         coalesce(sum(case when status in ('approved','processing','completed') then amount_lamports else 0 end),0)::bigint as locked_or_paid,
+         coalesce(sum(case when status = 'completed' then amount_lamports else 0 end),0)::bigint as paid
+       from affiliate_payout_requests
+      where affiliate_code=$1`,
+    [code]
+  );
+  const earned = BigInt(c[0]?.earned || 0);
+  const lockedOrPaid = BigInt(p[0]?.locked_or_paid || 0);
+  const paid = BigInt(p[0]?.paid || 0);
+  return {
+    lifetimeEarned: earned,
+    currentBalance: earned > lockedOrPaid ? earned - lockedOrPaid : 0n,
+    lifetimePaid:   paid,
+  };
+}
+
+// GET: my affiliate balance (+settings & pending info)
+router.get("/affiliates/me/balance", async (req, res) => {
+  try {
+    const wallet = normalizeWallet(req.query.wallet);
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
+
+    const aff = await getAffiliateForWallet(wallet);
+    if (!aff) return res.status(404).json({ error: "affiliate not found" });
+    if (aff.status && aff.status !== "active") {
+      return res.status(403).json({ error: `affiliate status=${aff.status}` });
+    }
+
+    const [settings, balances, pend] = await Promise.all([
+      getPayoutSettings(),
+      getAffiliateBalancesByCode(aff.code),
+      db.pool.query(
+        `select id, amount_lamports, status, network, requested_at
+           from affiliate_payout_requests
+          where affiliate_code=$1 and status='pending'
+          order by requested_at desc limit 1`,
+        [aff.code]
+      ),
+    ]);
+
+    const pending = pend.rows[0] || null;
+    const available = balances.currentBalance;
+    const canRequest = available >= settings.thresholdLamports && !pending;
+
+    res.json({
+      affiliateCode: aff.code,
+      status: aff.status,
+      availableLamports: big(available.toString()),
+      availableUsd: +lamportsToUsd(available).toFixed(2),
+      settings: {
+        thresholdUsd: +lamportsToUsd(settings.thresholdLamports).toFixed(2),
+        maxAmountUsd: +lamportsToUsd(settings.maxAmountLamports).toFixed(2),
+        defaultNetwork: settings.defaultNetwork,
+        manualReviewAboveUsd: +lamportsToUsd(settings.manualReviewAboveLamports).toFixed(2),
+      },
+      pendingRequest: pending
+        ? {
+            id: String(pending.id),
+            status: pending.status,
+            amountUsd: +lamportsToUsd(BigInt(pending.amount_lamports || 0)).toFixed(2),
+            network: pending.network,
+            requestedAt: new Date(pending.requested_at).toISOString(),
+          }
+        : null,
+      canRequest,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// GET: my payout requests (history)
+router.get("/affiliates/me/payouts", async (req, res) => {
+  try {
+    const wallet = normalizeWallet(req.query.wallet);
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
+
+    const aff = await getAffiliateForWallet(wallet);
+    if (!aff) return res.status(404).json({ error: "affiliate not found" });
+
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+    const { rows } = await db.pool.query(
+      `select id, amount_lamports, status, network, tx_hash, requested_at, processed_at, notes
+         from affiliate_payout_requests
+        where affiliate_code=$1
+        order by coalesce(processed_at, requested_at) desc nulls last
+        limit $2`,
+      [aff.code, limit]
+    );
+
+    const out = rows.map((r) => ({
+      id: String(r.id),
+      status: r.status,
+      amountUsd: +lamportsToUsd(BigInt(r.amount_lamports || 0)).toFixed(2),
+      amountLamports: String(r.amount_lamports),
+      network: r.network,
+      txHash: r.tx_hash || null,
+      requestedAt: r.requested_at ? new Date(r.requested_at).toISOString() : null,
+      processedAt: r.processed_at ? new Date(r.processed_at).toISOString() : null,
+      notes: r.notes || null,
+    }));
+
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// POST: create payout request (user → admin approval)
+router.post("/affiliates/me/payout-request", async (req, res) => {
+  try {
+    const wallet = normalizeWallet(req.body?.wallet || req.body?.userWallet);
+    // optional: amountUsd / amountLamports; optional network override
+    const amountUsd = req.body?.amountUsd != null ? Number(req.body.amountUsd) : null;
+    const amountLamportsIn = req.body?.amountLamports != null ? BigInt(String(req.body.amountLamports)) : null;
+    const networkIn = req.body?.network ? String(req.body.network).toUpperCase() : null;
+
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
+
+    const aff = await getAffiliateForWallet(wallet);
+    if (!aff) return res.status(404).json({ error: "affiliate not found" });
+    if (aff.status && aff.status !== "active") {
+      return res.status(403).json({ error: `affiliate status=${aff.status}` });
+    }
+
+    // block duplicate pending
+    const { rows: pend } = await db.pool.query(
+      `select 1 from affiliate_payout_requests where affiliate_code=$1 and status='pending' limit 1`,
+      [aff.code]
+    );
+    if (pend.length) return res.status(409).json({ error: "A payout request is already pending." });
+
+    const settings = await getPayoutSettings();
+    const balances = await getAffiliateBalancesByCode(aff.code);
+    const available = balances.currentBalance;
+
+    // figure amount
+    let requestedLamports = 0n;
+    if (amountLamportsIn != null) {
+      requestedLamports = amountLamportsIn;
+    } else if (amountUsd != null) {
+      requestedLamports = usdToLamports(amountUsd);
+    } else {
+      // default: ask for full available up to max
+      requestedLamports = available;
+    }
+
+    if (requestedLamports <= 0n) {
+      return res.status(400).json({ error: "Requested amount must be > 0" });
+    }
+
+    // cap by available and max
+    if (requestedLamports > available) requestedLamports = available;
+    if (requestedLamports > settings.maxAmountLamports) requestedLamports = settings.maxAmountLamports;
+
+    if (requestedLamports < settings.thresholdLamports) {
+      return res.status(400).json({
+        error: "below-threshold",
+        details: {
+          minUsd: +lamportsToUsd(settings.thresholdLamports).toFixed(2),
+          requestedUsd: +lamportsToUsd(requestedLamports).toFixed(2),
+        },
+      });
+    }
+
+    const requiresManual = requestedLamports >= settings.manualReviewAboveLamports;
+    const network = networkIn || settings.defaultNetwork;
+
+    const ins = await db.pool.query(
+      `insert into affiliate_payout_requests
+        (affiliate_code, affiliate_wallet, amount_lamports, network, status, is_automatic, requires_manual_review, fraud_score, notes)
+       values ($1,$2,$3,$4,'pending',false,$5,0, $6)
+       returning id, requested_at`,
+      [aff.code, String(wallet), String(requestedLamports), network, requiresManual, req.body?.notes || null]
+    );
+
+    // Response mirrors what UI needs; admin will later set approved/processing/completed
+    res.json({
+      ok: true,
+      requestId: String(ins.rows[0].id),
+      status: "pending",
+      network,
+      amountLamports: requestedLamports.toString(),
+      amountUsd: +lamportsToUsd(requestedLamports).toFixed(2),
+      // provisional (pending does not lock in view until approved)
+      availableBeforeUsd: +lamportsToUsd(available).toFixed(2),
+      provisionalAvailableAfterUsd: +lamportsToUsd(available - requestedLamports).toFixed(2),
+      requestedAt: new Date(ins.rows[0].requested_at).toISOString(),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+/* =========================================================================
+   ADD: Minimal endpoints to support frontend /promo/affiliates/me/unclaimed + /claim
+   ======================================================================= */
+
+// GET /promo/affiliates/me/unclaimed
+router.get("/affiliates/me/unclaimed", async (req, res) => {
+  try {
+    const wallet = normalizeWallet(req.query.wallet);
+    if (!wallet) return res.status(400).json({ error: "wallet is required" });
+
+    const aff = await getAffiliateForWallet(wallet);
+    if (!aff) return res.status(404).json({ error: "affiliate not found" });
+    if (aff.status && aff.status !== "active") {
+      return res.status(403).json({ error: `affiliate status=${aff.status}` });
+    }
+
+    const [settings, balances, pend, ts] = await Promise.all([
+      getPayoutSettings(),
+      getAffiliateBalancesByCode(aff.code),
+      db.pool.query(
+        `select 1 from affiliate_payout_requests
+          where affiliate_code=$1 and status in ('pending','processing')
+          limit 1`,
+        [aff.code]
+      ),
+      db.pool.query(
+        `select max(created_at) as ts from affiliate_commissions where referrer_wallet=$1`,
+        [wallet]
+      ),
+    ]);
+
+    // cooldown computation (based on last request time)
+    let nextEligibleAt = null;
+    if (AFF_PAYOUT_COOLDOWN_MINUTES > 0) {
+      const { rows: lastRows } = await db.pool.query(
+        `select max(requested_at) as last_at
+           from affiliate_payout_requests
+          where affiliate_code = $1`,
+        [aff.code]
+      );
+      const last = lastRows[0]?.last_at ? new Date(lastRows[0].last_at) : null;
+      if (last) {
+        const next = new Date(last.getTime() + AFF_PAYOUT_COOLDOWN_MINUTES * 60 * 1000);
+        if (next > new Date()) nextEligibleAt = next.toISOString();
+      }
+    }
+
+    const thresholdUsd = lamportsToUsd(BigInt(settings.thresholdLamports));
+    const availableLam = balances.currentBalance;
+    const availableUsd = lamportsToUsd(availableLam);
+    const hasPending = pend.rows.length > 0;
+    const cooldownOpen = !nextEligibleAt || new Date(nextEligibleAt).getTime() <= Date.now();
+    const canClaim = !hasPending && cooldownOpen && availableLam >= settings.thresholdLamports && availableLam > 0n;
+
+    res.json({
+      amount: +availableUsd.toFixed(2),
+      lastUpdated: ts.rows[0]?.ts ? new Date(ts.rows[0].ts).toISOString() : new Date().toISOString(),
+      canClaim,
+      minimum: +thresholdUsd.toFixed(2),
+      ...(nextEligibleAt ? { nextEligibleAt } : {}),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// POST /promo/affiliates/me/claim
+router.post("/affiliates/me/claim", async (req, res) => {
+  try {
+    const wallet = normalizeWallet(req.body?.wallet);
+    if (!wallet) return res.status(400).json({ success: false, claimedAmount: 0, message: "wallet is required" });
+
+    const aff = await getAffiliateForWallet(wallet);
+    if (!aff) return res.status(404).json({ success: false, claimedAmount: 0, message: "affiliate not found" });
+    if (aff.status && aff.status !== "active") {
+      return res.status(403).json({ success: false, claimedAmount: 0, message: `affiliate status=${aff.status}` });
+    }
+
+    // Respect pending/processing block
+    const { rows: pend } = await db.pool.query(
+      `select 1 from affiliate_payout_requests where affiliate_code=$1 and status in ('pending','processing') limit 1`,
+      [aff.code]
+    );
+    if (pend.length) {
+      return res.status(200).json({
+        success: false,
+        claimedAmount: 0,
+        message: "A payout request is already in progress.",
+      });
+    }
+
+    const settings = await getPayoutSettings();
+    const balances = await getAffiliateBalancesByCode(aff.code);
+    let requestedLamports = balances.currentBalance;
+
+    if (requestedLamports <= 0n) {
+      return res.status(200).json({ success: false, claimedAmount: 0, message: "No available balance to claim." });
+    }
+
+    // cooldown
+    if (AFF_PAYOUT_COOLDOWN_MINUTES > 0) {
+      const { rows: lastRows } = await db.pool.query(
+        `select max(requested_at) as last_at
+           from affiliate_payout_requests
+          where affiliate_code = $1`,
+        [aff.code]
+      );
+      const last = lastRows[0]?.last_at ? new Date(lastRows[0].last_at) : null;
+      if (last) {
+        const next = new Date(last.getTime() + AFF_PAYOUT_COOLDOWN_MINUTES * 60 * 1000);
+        if (next > new Date()) {
+          return res.status(200).json({
+            success: false,
+            claimedAmount: 0,
+            message: `You can request again after ${next.toISOString()}.`,
+          });
+        }
+      }
+    }
+
+    // cap by max & threshold
+    if (requestedLamports > settings.maxAmountLamports) requestedLamports = settings.maxAmountLamports;
+    if (requestedLamports < settings.thresholdLamports) {
+      return res.status(200).json({
+        success: false,
+        claimedAmount: +lamportsToUsd(requestedLamports).toFixed(2),
+        message: `Minimum payout is $${lamportsToUsd(settings.thresholdLamports).toFixed(2)}.`,
+      });
+    }
+
+    const requiresManual = requestedLamports >= settings.manualReviewAboveLamports;
+    const network = settings.defaultNetwork;
+
+    const ins = await db.pool.query(
+      `insert into affiliate_payout_requests
+        (affiliate_code, affiliate_wallet, amount_lamports, network, status, is_automatic, requires_manual_review, fraud_score, notes)
+       values ($1,$2,$3,$4,'pending',false,$5,0,$6)
+       returning id`,
+      [aff.code, String(wallet), String(requestedLamports), network, requiresManual, "User-initiated claim via /affiliates/me/claim"]
+    );
+
+    const claimedUsd = lamportsToUsd(requestedLamports);
+
+    return res.status(200).json({
+      success: true,
+      claimedAmount: +claimedUsd.toFixed(2),
+      transactionId: String(ins.rows[0].id), // internal reference; admin later attaches chain tx
+      message: "Request submitted. Admin will review and credit upon approval.",
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, claimedAmount: 0, message: e?.message || String(e) });
+  }
+});
+
+/* =========================================================================
+   NEW: ADMIN PAYOUT ENDPOINTS — approval triggers on-chain transfer to PDA
+   ======================================================================= */
+
+// List payouts (optionally filter by ?status=pending|processing|completed|rejected)
+router.get("/affiliates/admin/payouts", adminAuth, async (req, res) => {
+  try {
+    const status = req.query.status ? String(req.query.status).toLowerCase() : null;
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 100)));
+    const params = [];
+    let where = "";
+    if (status) {
+      where = "where status = $1";
+      params.push(status);
+    }
+    params.push(limit);
+    const { rows } = await db.pool.query(
+      `select id, affiliate_code, affiliate_wallet, amount_lamports, network, status, tx_hash, requested_at, processed_at, notes
+         from affiliate_payout_requests
+         ${where}
+         order by coalesce(processed_at, requested_at) desc nulls last
+         limit $${params.length}`,
+      params
+    );
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// Get payout detail + PDA info
+router.get("/affiliates/admin/payouts/:id", adminAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { rows } = await db.pool.query(
+      `select * from affiliate_payout_requests where id=$1 limit 1`,
+      [id]
+    );
+    const r = rows[0];
+    if (!r) return res.status(404).json({ error: "not found" });
+    const pda = userVaultPda(r.affiliate_wallet).toBase58();
+
+    // account existence check (best-effort)
+    let vaultExists = null;
+    try {
+      const { Connection } = require("@solana/web3.js");
+      const RPC_HTTP = process.env.CLUSTER || "https://api.devnet.solana.com";
+      const conn = new Connection(RPC_HTTP, "confirmed");
+      const info = await conn.getAccountInfo(new (require("@solana/web3.js").PublicKey)(pda), "confirmed");
+      vaultExists = !!info;
+    } catch (_) {}
+
+    res.json({ ...r, vaultPda: pda, vaultExists });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// APPROVE & PAY: moves lamports from HOUSE wallet to user's vault PDA
+router.post("/affiliates/admin/payouts/:id/approve", adminAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // lock the row if it's pending
+    const { rows } = await client.query(
+      `update affiliate_payout_requests
+          set status='processing', processed_at=now()
+        where id=$1 and status='pending'
+        returning id, affiliate_code, affiliate_wallet, amount_lamports, network`,
+      [id]
+    );
+    const r = rows[0];
+    if (!r) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ error: "not-found-or-not-pending" });
+    }
+
+    // Perform on-chain transfer to PDA
+    try {
+      const amt = BigInt(r.amount_lamports);
+      const { txSig, toVault } = await depositBonusToVault({
+        userWallet: r.affiliate_wallet,
+        lamports: amt,
+      });
+
+      // success → mark completed + store tx hash
+      await client.query(
+        `update affiliate_payout_requests
+            set status='completed', tx_hash=$2, notes=coalesce(notes,'') || $3, processed_at=now()
+          where id=$1`,
+        [id, txSig, `\nPaid to vault: ${toVault}`]
+      );
+
+      await client.query("COMMIT");
+      return res.json({
+        ok: true,
+        id: String(id),
+        status: "completed",
+        txSig,
+        toVault,
+        amountLamports: String(amt),
+      });
+    } catch (err) {
+      const code = err?.code || "";
+      const pda = userVaultPda(r.affiliate_wallet).toBase58();
+      // revert to pending for manual fix
+      await client.query(
+        `update affiliate_payout_requests
+            set status='pending', notes=coalesce(notes,'') || $2
+          where id=$1`,
+        [id, `\napprove-failed: ${code} ${err?.message || err}`]
+      );
+      await client.query("COMMIT");
+      return res.status(500).json({
+        ok: false,
+        error: err?.message || String(err),
+        code,
+        hint:
+          code === "VAULT_NOT_ACTIVATED"
+            ? { pda, action: "Ask user to initialize their vault in dApp (open wallet & perform a small deposit/withdraw once)." }
+            : undefined,
+      });
+    }
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch(_) {}
+    res.status(500).json({ error: e?.message || String(e) });
+  } finally {
+    client.release();
+  }
+});
+
+// REJECT with optional notes
+router.post("/affiliates/admin/payouts/:id/reject", adminAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const notes = req.body?.notes ? String(req.body.notes) : null;
+    const { rowCount } = await db.pool.query(
+      `update affiliate_payout_requests
+          set status='rejected', notes=coalesce(notes,'') || $2, processed_at=now()
+        where id=$1 and status in ('pending','processing')`,
+      [id, notes ? `\nrejected: ${notes}` : "\nrejected"]
+    );
+    if (!rowCount) return res.status(409).json({ error: "not-found-or-not-eligible" });
+    res.json({ ok: true, id: String(id), status: "rejected" });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
 
 // ---------- EXPORTS for WS handlers ----------
 router.creditAffiliateAndRakeback = creditAffiliateAndRakeback;
 router.applyWagerContribution = applyWagerContribution;
 router.activateWelcomeBonus = activateWelcomeBonus;
-// at bottom
+// prefer service implementation for on-chain calc/side-effects if available
 router.creditAffiliateAndRakeback = async function(args) {
   return affiliateService.creditAffiliateAndRakeback(args);
 };
-
 
 module.exports = router;
