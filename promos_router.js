@@ -459,7 +459,7 @@ router.get("/chest/daily/eligibility", async (req, res) => {
     const ymd = dateToYMD(today);
     const wageredToday = await didWagerOnDate(wallet, ymd);
     if (!wageredToday) {
-      return res.json({ eligible: false, reason: "no wager today", streak: 0 });
+      return res.json({ eligible: false, reason: "Play some bets to unlock your daily chest", streak: 0 });
     }
 
     const already = await db.pool.query(
@@ -2268,3 +2268,4 @@ router.creditAffiliateAndRakeback = async function(args) {
 };
 
 module.exports = router;
+
