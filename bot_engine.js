@@ -258,16 +258,63 @@ function attachBotFeed(io) {
 }
 
 // ---- Manual Big Win trigger ----
+// Ensures payout is randomized BETWEEN 100 and 1500 (inclusive-ish with 2dp),
+// and keeps amountSol * multiplier === payoutSol.
 function triggerBigWin(payload = {}) {
   if (!IO) throw new Error("Socket.io not initialized");
 
-  const amountSol =
-    payload.amountSol != null ? Number(payload.amountSol) : CONFIG.maxSol;
-  const multiplier =
-    payload.multiplier != null ? Number(payload.multiplier) : Math.max(
-      CONFIG.bigWinMinMult,
-      100
-    );
+  // 1) Decide target payout in [100, 1500]
+  let targetPayout = Number(rand(100, 1500).toFixed(2));
+
+  // 2) Resolve amountSol
+  let amountSol;
+  if (payload.amountSol != null) {
+    amountSol = Number(payload.amountSol);
+  } else {
+    // Try to back into a realistic amountSol using existing multiplier set
+    const candidates = CONFIG.multipliers
+      .filter((m) => Number.isFinite(m) && m > 1)
+      .sort(() => Math.random() - 0.5); // shuffle
+
+    let picked = null;
+    for (const m of candidates) {
+      const amt = Number((targetPayout / m).toFixed(2));
+      if (amt >= CONFIG.minSol && amt <= CONFIG.maxSol) {
+        picked = { amt, m };
+        break;
+      }
+    }
+
+    if (picked) {
+      amountSol = picked.amt;
+    } else {
+      // Fallback: aim near the middle of allowed amounts
+      const midMult = 10; // reasonable big-win multiplier baseline
+      let guessAmt = targetPayout / midMult;
+      // clamp into [minSol, maxSol]
+      guessAmt = Math.max(CONFIG.minSol, Math.min(CONFIG.maxSol, guessAmt));
+      amountSol = Number(guessAmt.toFixed(2));
+    }
+  }
+
+  // Guard against zero/invalid amounts
+  if (!Number.isFinite(amountSol) || amountSol <= 0) {
+    amountSol = Math.max(CONFIG.minSol, 0.01);
+    amountSol = Number(amountSol.toFixed(2));
+  }
+
+  // 3) Derive multiplier from payout & amount, then recompute payout for exact consistency
+  let multiplier = Number((targetPayout / amountSol).toFixed(2));
+  let payoutSol = Number((amountSol * multiplier).toFixed(2));
+
+  // 4) Correct for rounding drifting outside [100, 1500]
+  if (payoutSol < 100) {
+    multiplier = Number(((100 / amountSol) + 0.01).toFixed(2));
+    payoutSol = Number((amountSol * multiplier).toFixed(2));
+  } else if (payoutSol > 1500) {
+    multiplier = Number((1500 / amountSol).toFixed(2));
+    payoutSol = Number((amountSol * multiplier).toFixed(2));
+  }
 
   const ev = _decorateFlags({
     simulated: true,
@@ -277,7 +324,7 @@ function triggerBigWin(payload = {}) {
     amountSol: Number(amountSol),
     result: "win",
     multiplier: Number(multiplier),
-    payoutSol: Number((Number(amountSol) * Number(multiplier)).toFixed(2)),
+    payoutSol: Number(payoutSol),
   });
 
   _updateStats(ev);
