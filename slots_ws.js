@@ -241,7 +241,14 @@ async function dbInsertLockedRow({ player, betLamports, clientSeed, serverSeedHa
 
     push("player", player);
     const betCol = pickFirst("bet_amount", "bet_lamports") || "bet_amount";
-    push(betCol, String(betLamports));
+
+// ⚙️ If we're writing into "bet_amount", store in SOL instead of lamports
+if (betCol === "bet_amount") {
+  push(betCol, Number(betLamports) / 1e9);
+} else {
+  push(betCol, String(betLamports));
+}
+
     if (hasCol("client_seed")) push("client_seed", String(clientSeed || ""));
     if (hasCol("server_seed_hash")) push("server_seed_hash", serverSeedHash);
     if (hasCol("server_seed")) push("server_seed", serverSeed.toString("hex"));
@@ -271,7 +278,17 @@ async function dbResolveUpdate({ player, nonce, grid, payoutLamports, resolveSig
 
     if (hasCol("grid_json")) { sets.push(`grid_json=$${i}`); params.push(JSON.stringify(grid)); i++; }
     const payCol = pickFirst("payout", "payout_lamports");
-    if (payCol) { sets.push(`${payCol}=$${i}`); params.push(Number(payoutLamports)); i++; }
+if (payCol === "payout") {
+  // Store in SOL
+  sets.push(`${payCol}=$${i}`);
+  params.push(Number(payoutLamports) / 1e9);
+  i++;
+} else if (payCol) {
+  sets.push(`${payCol}=$${i}`);
+  params.push(Number(payoutLamports));
+  i++;
+}
+
     if (hasCol("status")) { sets.push(`status='resolved'`); }
     const resCol = pickFirst("resolve_sig", "resolved_tx_sig", "resolved_sig");
     if (resCol) { sets.push(`${resCol}=$${i}`); params.push(resolveSig || null); i++; }
