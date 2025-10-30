@@ -1688,6 +1688,15 @@ async function main() {
     }
   });
 
+  try {
+  const winsFeed = require("./ws_wins");
+  winsFeed.attachWinsFeed(io);
+  global.pushWinEvent = winsFeed.pushWinEvent; // optional global helper
+  console.log("Wins feed mounted");
+} catch (e) {
+  console.warn("ws_wins not found:", e?.message || e);
+}
+
   // Other WS modules
   try {
     const slots = require("./slots_ws");

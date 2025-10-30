@@ -111,11 +111,12 @@ function _updateStats(ev) {
 }
 
 function isBigWin(ev) {
-  const mult = Number(ev.multiplier || 0);
   const payout = Number(ev.payoutSol || 0);
+  // Since payoutSol is already USD, mark as bigwin if payout between 100–1500 USD
   return (
     String(ev.result) === "win" &&
-    (mult >= Number(CONFIG.bigWinMinMult) || payout >= Number(CONFIG.bigWinMinPayout))
+    payout >= 100 &&
+    payout <= 1500
   );
 }
 

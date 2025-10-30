@@ -48,6 +48,8 @@ const {
 
 const DB = global.db || require("./db");
 const Promo = require("./promo_balance");
+const { pushWinEvent } = require("./ws_wins");
+
 
 // bonus checks optional
 let precheckOrThrow = async () => {};
@@ -736,6 +738,8 @@ function attachDice(io, app /* optional */) {
               hmacHex: hmacHex || null,
             });
           }
+          
+          
 
           dicePending.delete(Number(nonce));
           return;
@@ -843,6 +847,18 @@ function attachDice(io, app /* optional */) {
           payoutLamports: Number(payoutLamports),
           txSig: sig,
         });
+
+        try {
+  pushWinEvent({
+    user: player,
+    game: "dice",
+    amountSol: Number(ctx.betLamports) / 1e9,
+    payoutSol: Number(payoutLamports) / 1e9,
+    result: payoutLamports > ctx.betLamports ? "win" : "loss",
+  });
+} catch (err) {
+  console.warn("[dice] pushWinEvent failed:", err?.message || err);
+}
 
         if (ctx.serverSeedHex) {
           socket.emit("dice:reveal_seed", {

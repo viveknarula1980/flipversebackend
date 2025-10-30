@@ -13,6 +13,8 @@ const {
 
 const DB = global.db || require("./db");
 const Promo = require("./promo_balance");
+const { pushWinEvent } = require("./ws_wins");
+
 
 let precheckOrThrow = async () => {};
 try { ({ precheckOrThrow } = require("./bonus_guard")); } catch (_) {}
@@ -481,6 +483,35 @@ async function createRoom(io, A, B) {
   };
   if (rooms.get(nonce).A.socketId) io.to(rooms.get(nonce).A.socketId).emit("coinflip:resolved", resultPayload);
   if (rooms.get(nonce).B.socketId) io.to(rooms.get(nonce).B.socketId).emit("coinflip:resolved", resultPayload);
+  // ---- pushWinEvent like dice ----
+try {
+  const amountSol = Number(entryLamports) / 1e9;
+  const payoutSol = Number(payout) / 1e9;
+
+  // winner
+  pushWinEvent({
+    user: winnerBase58Init,
+    game: "coinflip",
+    amountSol,
+    payoutSol,
+    result: payoutSol > amountSol ? "win" : "loss",
+  });
+
+  // loser
+  const loserWallet =
+    winnerBase58Init === A_pk.toBase58() ? B_pk.toBase58() : A_pk.toBase58();
+
+  pushWinEvent({
+    user: loserWallet,
+    game: "coinflip",
+    amountSol,
+    payoutSol: 0,
+    result: "loss",
+  });
+} catch (err) {
+  console.warn("[coinflip] pushWinEvent failed:", err?.message || err);
+}
+
 
   // PF reveal
   try {

@@ -16,6 +16,7 @@ try { ({ precheckOrThrow } = require("./bonus_guard")); } catch (_) {}
 
 // ---- promo (fake) balance helpers ----
 const Promo = require("./promo_balance");
+const { pushWinEvent } = require("./ws_wins");
 
 // ---- solana helpers ----
 const baseSolana = require("./solana");
@@ -794,6 +795,18 @@ function attachSlots(io) {
           txSig,
           promoBalanceLamports: promoBalance != null ? Number(promoBalance) : undefined,
         });
+        // ---- push live win event ----
+try {
+  pushWinEvent({
+    user: player,
+    game: "slots",
+    amountSol: Number(ctx.betLamports) / 1e9,
+    payoutSol: Number(payoutLamports) / 1e9,
+    result: payoutLamports > ctx.betLamports ? "win" : "loss",
+  });
+} catch (err) {
+  console.warn("[slots] pushWinEvent failed:", err?.message || err);
+}
 
         // provably-fair reveal
         try {

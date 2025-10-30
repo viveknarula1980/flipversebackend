@@ -10,6 +10,8 @@ const {
 
 const DB = global.db || require("./db");
 const Promo = require("./promo_balance");
+const { pushWinEvent } = require("./ws_wins");
+
 let precheckOrThrow = async () => {};
 try { ({ precheckOrThrow } = require("./bonus_guard")); } catch (_) {}
 
@@ -544,6 +546,20 @@ function attachCrash(io, app) {
               socket.emit("crash:reveal_seed", revealPayload);
 
               rounds.delete(Number(nonce));
+
+              // ---- Push live win feed (loss) ----
+try {
+  pushWinEvent({
+    user: ctx.wallet,
+    game: "crash",
+    amountSol: Number(ctx.betLamports) / 1e9,
+    payoutSol: 0,
+    result: "loss",
+  });
+} catch (err) {
+  console.warn("[crash] pushWinEvent (loss) failed:", err?.message || err);
+}
+
             }
           } catch (tickErr) {
             console.error("crash tick err:", tickErr);
@@ -622,6 +638,24 @@ function attachCrash(io, app) {
           socket.emit("crash:reveal_seed", revealPayload);
 
           rounds.delete(Number(nonce));
+
+          // ---- Push live win feed (cashout) ----
+try {
+  const payoutSol = ctx.fakeMode
+    ? Number(grossPayoutLamports(ctx.betLamports, m)) / 1e9
+    : Number(ctx.betLamports * BigInt(toBps(m)) / 10000n) / 1e9;
+
+  pushWinEvent({
+    user: ctx.wallet,
+    game: "crash",
+    amountSol: Number(ctx.betLamports) / 1e9,
+    payoutSol,
+    result: payoutSol > Number(ctx.betLamports) / 1e9 ? "win" : "loss",
+  });
+} catch (err) {
+  console.warn("[crash] pushWinEvent (cashout) failed:", err?.message || err);
+}
+
         } else {
           // ----- FAKE MODE (promo) pays GROSS (stake was frozen) -----
           const payoutGross = grossPayoutLamports(ctx.betLamports, m); // GROSS

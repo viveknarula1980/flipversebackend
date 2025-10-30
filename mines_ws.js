@@ -26,6 +26,8 @@ try { ({ precheckOrThrow } = require("./bonus_guard")); } catch (_) {}
 
 // ---------- promo balance helpers ----------
 const Promo = require("./promo_balance");
+const { pushWinEvent } = require("./ws_wins");
+
 
 // ---------- solana helpers ----------
 const baseSolana = require("./solana");
@@ -592,7 +594,20 @@ function attachMines(io) {
           io.emit("mines:resolved", { ...payload, payoutLamports: 0, tx: txSig, safeSteps: ctx.opened.size });
 
           rounds.delete(Number(ctx.nonce));
+          try {
+  pushWinEvent({
+    user: ctx.playerPk.toBase58(),
+    game: "mines",
+    amountSol: Number(ctx.betLamports) / 1e9,
+    payoutSol: 0,
+    result: "loss",
+  });
+} catch (err) {
+  console.warn("[mines] pushWinEvent (loss) failed:", err?.message || err);
+}
+
           return;
+          
         }
 
         // safe tile
@@ -741,6 +756,20 @@ function attachMines(io) {
         io.emit("mines:resolved", payload);
 
         rounds.delete(Number(ctx.nonce));
+
+   try {
+  pushWinEvent({
+    user: ctx.playerPk.toBase58(),
+    game: "mines",
+    amountSol: Number(ctx.betLamports) / 1e9,
+    payoutSol: Number(payoutGross) / 1e9,
+    result: payoutGross > ctx.betLamports ? "win" : "loss",
+  });
+} catch (err) {
+  console.warn("[mines] pushWinEvent (cashout) failed:", err?.message || err);
+}
+
+
       } catch (e) {
         console.error("mines:cashout error:", e);
         socket.emit("mines:error", { code: "CASHOUT_FAIL", message: e?.message || String(e) });
