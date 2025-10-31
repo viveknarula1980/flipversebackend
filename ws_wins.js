@@ -111,14 +111,16 @@ function computeStats() {
 
 // --- Attach WebSocket feed ---
 function attachWinsFeed(io) {
-  ioRef = io;
+  const winsNamespace = io.of("/wins");
+  ioRef = winsNamespace;
 
-  io.on("connection", (socket) => {
+  winsNamespace.on("connection", (socket) => {
     socket.emit("wins:recent", recentEvents);
   });
 
-  console.log("✅ Wins WebSocket feed attached (values in USDT)");
+  console.log("✅ Wins WebSocket feed attached at /wins (values in USDT)");
 }
+
 
 // --- Export functions ---
 module.exports = {
