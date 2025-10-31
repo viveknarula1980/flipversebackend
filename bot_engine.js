@@ -2,8 +2,8 @@
 // Socket namespace: /fake-feed
 // Events:
 //   - 'activity'  : all events
-//   - 'bigwin'    : only big-win events
-//   - 'jackpot'   : only jackpot events
+//   - 'bigwin'    : only big-win events (payout 100–1500)
+//   - 'jackpot'   : only jackpot events (mult >= jackpotMinMult OR payout >= jackpotMinPayout)
 //   - 'live'      : live stats after each event
 // REST:
 //   /admin/bot/config (GET/POST)
@@ -11,6 +11,7 @@
 //   /admin/bot/stats (GET)
 //   /admin/bot/recent (GET?limit=..&type=all|bigwin|jackpot)
 //   /admin/bot/bigwin (POST)
+//   /admin/bot/bigwin/status (GET)
 //   /admin/bot/reset-stats (POST)
 
 const DEFAULT_CONFIG = {
@@ -38,7 +39,7 @@ const DEFAULT_CONFIG = {
 
   // ---- thresholds for filtered streams ----
   bigWinMinMult: Number(process.env.BIGWIN_MULT || 10),
-  bigWinMinPayout: Number(process.env.BIGWIN_PAYOUT || 5), // SOL
+  bigWinMinPayout: Number(process.env.BIGWIN_PAYOUT || 5), // SOL (not used for bigwin flag below)
   jackpotMinMult: Number(process.env.JACKPOT_MULT || 50),
   jackpotMinPayout: Number(process.env.JACKPOT_PAYOUT || 50), // SOL
 };
@@ -49,6 +50,11 @@ let CONFIG = { ...DEFAULT_CONFIG };
 let IO = null;
 const FEED_NS = "/fake-feed";
 let TIMER = null;
+
+// ===== Big Win auto-campaign (6 hours) =====
+const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+let BIGWIN_LOOP_TIMER = null;
+let BIGWIN_DEADLINE = 0; // epoch ms; 0 => inactive
 
 // Live stats
 const STATS = {
@@ -62,7 +68,7 @@ const STATS = {
   usersSeen: new Map(),
 };
 
-// Recent buffer (server-side) — so first-time visitors get previous events
+// Recent buffer
 const MAX_RECENT = 200;
 const RECENT = []; // keep newest at end
 
@@ -80,7 +86,7 @@ function _filterType(ev, type) {
 function getRecentActivities(limit = 50, type = "all") {
   const pool = RECENT.filter((e) => _filterType(e, type));
   const slice = pool.slice(-Math.max(0, Math.min(limit, pool.length)));
-  // return newest-first to match client expectation
+  // return newest-first
   return slice.slice().reverse();
 }
 
@@ -92,6 +98,9 @@ function randInt(min, max) {
 }
 function pick(arr) {
   return arr[randInt(0, arr.length - 1)];
+}
+function round2(n) {
+  return Number(n.toFixed(2));
 }
 function nextDelay() {
   return Math.round(rand(CONFIG.minMs, CONFIG.maxMs));
@@ -110,16 +119,14 @@ function _updateStats(ev) {
   }
 }
 
+// ----- Filters -----
+// Big Win: payout between 100–1500 (UI expects this)
 function isBigWin(ev) {
   const payout = Number(ev.payoutSol || 0);
-  // Since payoutSol is already USD, mark as bigwin if payout between 100–1500 USD
-  return (
-    String(ev.result) === "win" &&
-    payout >= 100 &&
-    payout <= 1500
-  );
+  return String(ev.result) === "win" && payout >= 100 && payout <= 1500;
 }
 
+// Jackpot: either huge multiplier or huge payout (configurable)
 function isJackpot(ev) {
   const mult = Number(ev.multiplier || 0);
   const payout = Number(ev.payoutSol || 0);
@@ -140,13 +147,14 @@ function _decorateFlags(ev) {
   return ev;
 }
 
+// ----- Event generation (normal flow) -----
 function generateEvent() {
   const user = pick(CONFIG.players);
   const game = pick(CONFIG.games);
-  const amount = Number(rand(CONFIG.minSol, CONFIG.maxSol)).toFixed(2);
+  const amount = round2(rand(CONFIG.minSol, CONFIG.maxSol));
   const isWin = Math.random() < CONFIG.winRate;
   const mult = isWin ? pick(CONFIG.multipliers) : pick([1, 1.1, 1.15]);
-  const payout = isWin ? (Number(amount) * Number(mult)).toFixed(2) : "0.00";
+  const payout = isWin ? round2(Number(amount) * Number(mult)) : 0;
 
   return _decorateFlags({
     simulated: true,
@@ -163,19 +171,17 @@ function generateEvent() {
 function _emitLive(feed, ev) {
   try {
     feed.emit("live", { stats: getStats(), last: ev });
-  } catch (e) {
-    // ignore
-  }
+  } catch (e) {}
 }
 
 function _broadcastEvent(ev) {
   const feed = IO.of(FEED_NS);
-  // all activity stream
+  // all events
   feed.emit("activity", ev);
-  // filtered streams
+  // filtered “views” of the same event object
   if (ev.bigwin) feed.emit("bigwin", ev);
   if (ev.jackpot) feed.emit("jackpot", ev);
-  // live stats snapshot
+  // live snapshot
   _emitLive(feed, ev);
 }
 
@@ -184,14 +190,11 @@ function _loopOnce() {
   const ev = generateEvent();
   _updateStats(ev);
   pushRecent(ev);
-
   try {
     _broadcastEvent(ev);
   } catch (e) {
-    // swallow errors so loop continues
     console.warn("[bot_engine] emit failed:", e?.message || e);
   }
-
   TIMER = setTimeout(_loopOnce, nextDelay());
 }
 
@@ -204,6 +207,8 @@ function startLoop() {
 function stopLoop() {
   if (TIMER) clearTimeout(TIMER);
   TIMER = null;
+  _stopBigWinLoop(); // stopping feed also stops campaign
+  BIGWIN_DEADLINE = 0;
 }
 
 function attachBotFeed(io) {
@@ -211,7 +216,6 @@ function attachBotFeed(io) {
   const ns = io.of(FEED_NS);
 
   ns.on("connection", (socket) => {
-    // client gets a hello + initial snapshot
     socket.emit("hello", {
       simulated: true,
       message: "Simulated activity feed (demo mode)",
@@ -223,7 +227,6 @@ function attachBotFeed(io) {
       },
     });
 
-    // send snapshot: stats + recent activities (+ filtered)
     try {
       socket.emit("snapshot", {
         stats: getStats(),
@@ -233,7 +236,6 @@ function attachBotFeed(io) {
       });
     } catch (e) {}
 
-    // optional: client can request filtered recent
     socket.on("fetch_recent", (opts, cb) => {
       try {
         const limit =
@@ -253,93 +255,136 @@ function attachBotFeed(io) {
     });
   });
 
-  // If enabled, start loop (server will run generative feed even if no clients connected)
   if (CONFIG.enabled) startLoop();
 }
 
-// ---- Manual Big Win trigger ----
-// Ensures payout is randomized BETWEEN 100 and 1500 (inclusive-ish with 2dp),
-// and keeps amountSol * multiplier === payoutSol.
-function triggerBigWin(payload = {}) {
-  if (!IO) throw new Error("Socket.io not initialized");
+// ===== Big Win creation using the SAME multiplier pool as live feed =====
+const BIGWIN_PAYOUT_MIN = 100;
+const BIGWIN_PAYOUT_MAX = 1500;
 
-  // 1) Decide target payout in [100, 1500]
-  let targetPayout = Number(rand(100, 1500).toFixed(2));
-
-  // 2) Resolve amountSol
-  let amountSol;
-  if (payload.amountSol != null) {
-    amountSol = Number(payload.amountSol);
-  } else {
-    // Try to back into a realistic amountSol using existing multiplier set
-    const candidates = CONFIG.multipliers
-      .filter((m) => Number.isFinite(m) && m > 1)
-      .sort(() => Math.random() - 0.5); // shuffle
-
-    let picked = null;
-    for (const m of candidates) {
-      const amt = Number((targetPayout / m).toFixed(2));
-      if (amt >= CONFIG.minSol && amt <= CONFIG.maxSol) {
-        picked = { amt, m };
-        break;
-      }
-    }
-
-    if (picked) {
-      amountSol = picked.amt;
-    } else {
-      // Fallback: aim near the middle of allowed amounts
-      const midMult = 10; // reasonable big-win multiplier baseline
-      let guessAmt = targetPayout / midMult;
-      // clamp into [minSol, maxSol]
-      guessAmt = Math.max(CONFIG.minSol, Math.min(CONFIG.maxSol, guessAmt));
-      amountSol = Number(guessAmt.toFixed(2));
-    }
+/**
+ * Feasible multipliers from CONFIG.multipliers that can yield a payout
+ * within [100..1500] for some stake in [minSol..maxSol].
+ * Feasible if: maxSol * m >= 100  AND  minSol * m <= 1500
+ */
+function feasibleMultipliers() {
+  const ms = (CONFIG.multipliers || [])
+    .map(Number)
+    .filter((m) => Number.isFinite(m) && m > 1);
+  const out = [];
+  for (const m of ms) {
+    const canReachMin = CONFIG.maxSol * m >= BIGWIN_PAYOUT_MIN;
+    const canStayUnderMax = CONFIG.minSol * m <= BIGWIN_PAYOUT_MAX;
+    if (canReachMin && canStayUnderMax) out.push(m);
   }
+  return out;
+}
 
-  // Guard against zero/invalid amounts
-  if (!Number.isFinite(amountSol) || amountSol <= 0) {
-    amountSol = Math.max(CONFIG.minSol, 0.01);
-    amountSol = Number(amountSol.toFixed(2));
-  }
+/**
+ * Given multiplier m (assumed feasible), pick a payout in the achievable
+ * intersection with [100..1500] and backsolve amountSol = payout / m.
+ * The resulting event has the SAME shape as normal wins so all filters work.
+ */
+function buildBigWinWithMultiplier(m, payload = {}) {
+  const low = Math.max(BIGWIN_PAYOUT_MIN, round2(CONFIG.minSol * m));
+  const high = Math.min(BIGWIN_PAYOUT_MAX, round2(CONFIG.maxSol * m));
+  const targetPayout = round2(rand(low, high));
+  const amountSol = round2(targetPayout / m);
 
-  // 3) Derive multiplier from payout & amount, then recompute payout for exact consistency
-  let multiplier = Number((targetPayout / amountSol).toFixed(2));
-  let payoutSol = Number((amountSol * multiplier).toFixed(2));
-
-  // 4) Correct for rounding drifting outside [100, 1500]
-  if (payoutSol < 100) {
-    multiplier = Number(((100 / amountSol) + 0.01).toFixed(2));
-    payoutSol = Number((amountSol * multiplier).toFixed(2));
-  } else if (payoutSol > 1500) {
-    multiplier = Number((1500 / amountSol).toFixed(2));
-    payoutSol = Number((amountSol * multiplier).toFixed(2));
-  }
-
-  const ev = _decorateFlags({
+  return _decorateFlags({
     simulated: true,
     ts: Date.now(),
     user: payload.user || pick(CONFIG.players),
-    game: payload.game || "memeslot",
+    game: payload.game || pick(CONFIG.games),
     amountSol: Number(amountSol),
     result: "win",
-    multiplier: Number(multiplier),
-    payoutSol: Number(payoutSol),
+    multiplier: Number(m),
+    payoutSol: Number(round2(amountSol * m)),
   });
+}
+
+// ---- Manual Big Win trigger ----
+// Multiplier is ALWAYS chosen from CONFIG.multipliers (same pool as live feed).
+// If admin passes payload.multiplier and it's feasible, it is honored.
+function triggerBigWin(payload = {}) {
+  if (!IO) throw new Error("Socket.io not initialized");
+
+  const feasible = feasibleMultipliers();
+  if (!feasible.length) {
+    // Fallback: still emit a win using the largest multiplier; may not flag as bigwin.
+    const fallbackM = Math.max(...(CONFIG.multipliers || [100]));
+    const ev = buildBigWinWithMultiplier(fallbackM, payload);
+    _updateStats(ev);
+    pushRecent(ev);
+    try { _broadcastEvent(ev); } catch (e) { console.warn("[bot_engine] bigwin emit failed:", e?.message || e); }
+    if (!payload.__fromCampaign && isBigWin(ev)) _startBigWinCampaignWindow();
+    return ev;
+  }
+
+  let chosen = null;
+  const requested = Number(payload.multiplier);
+  if (Number.isFinite(requested) && feasible.includes(requested)) {
+    chosen = requested;
+  } else {
+    chosen = pick(feasible);
+  }
+
+  const ev = buildBigWinWithMultiplier(chosen, payload);
 
   _updateStats(ev);
   pushRecent(ev);
 
   try {
-    _broadcastEvent(ev); // IMMEDIATE broadcast to all + filtered
+    _broadcastEvent(ev);
   } catch (e) {
     console.warn("[bot_engine] bigwin emit failed:", e?.message || e);
   }
 
+  if (!payload.__fromCampaign) _startBigWinCampaignWindow();
+
   return ev;
 }
 
-// ---- Stats reset (useful for admin dashboards) ----
+// ===============
+// Big Win campaign (auto-fire during 6h window)
+// ===============
+function _stopBigWinLoop() {
+  if (BIGWIN_LOOP_TIMER) {
+    clearTimeout(BIGWIN_LOOP_TIMER);
+    BIGWIN_LOOP_TIMER = null;
+  }
+}
+
+function _scheduleNextBigWin() {
+  if (!CONFIG.enabled || !IO || BIGWIN_DEADLINE === 0 || Date.now() >= BIGWIN_DEADLINE) {
+    _stopBigWinLoop();
+    BIGWIN_DEADLINE = 0;
+    if (!CONFIG.enabled) console.log("[bigwin_campaign] stopped because feed disabled");
+    else console.log("[bigwin_campaign] ended (deadline reached)");
+    return;
+  }
+
+  BIGWIN_LOOP_TIMER = setTimeout(() => {
+    try {
+      triggerBigWin({ __fromCampaign: true });
+    } catch (e) {
+      console.warn("[bigwin_campaign] trigger failed:", e?.message || e);
+    }
+    _scheduleNextBigWin();
+  }, nextDelay());
+}
+
+function _startBigWinCampaignWindow() {
+  if (!CONFIG.enabled) {
+    setConfig({ enabled: true }); // start normal activity too
+  }
+  BIGWIN_DEADLINE = Date.now() + SIX_HOURS_MS;
+  _stopBigWinLoop();
+  console.log("[bigwin_campaign] started/extended for 6 hours");
+  _scheduleNextBigWin();
+}
+
+// ---- Stats reset ----
 function resetStats() {
   STATS.startedAt = Date.now();
   STATS.lastActivityTs = null;
@@ -351,7 +396,6 @@ function resetStats() {
   STATS.usersSeen.clear();
 }
 
-//
 // ---- Admin REST glue ----
 function _toBool(x, fallback) {
   if (typeof x === "boolean") return x;
@@ -403,8 +447,11 @@ function setConfig(partial = {}) {
   if (CONFIG.minMs > CONFIG.maxMs) [CONFIG.minMs, CONFIG.maxMs] = [CONFIG.maxMs, CONFIG.minMs];
   if (CONFIG.minSol > CONFIG.maxSol) [CONFIG.minSol, CONFIG.maxSol] = [CONFIG.maxSol, CONFIG.minSol];
 
-  if (CONFIG.enabled && !prevEnabled) startLoop();
-  else if (!CONFIG.enabled && prevEnabled) stopLoop();
+  if (CONFIG.enabled && !prevEnabled) {
+    startLoop();
+  } else if (!CONFIG.enabled && prevEnabled) {
+    stopLoop(); // also stops campaign
+  }
 }
 
 function getConfig() {
@@ -430,7 +477,6 @@ function getStats() {
     dailyVolume: Number(STATS.volumeSol.toFixed(3)),
     totalPayout: Number(STATS.payoutSol.toFixed(3)),
     winRate: winRatePct,
-    // expose thresholds so dashboard can show badges consistently
     thresholds: {
       bigWinMinMult: CONFIG.bigWinMinMult,
       bigWinMinPayout: CONFIG.bigWinMinPayout,
@@ -464,7 +510,7 @@ function attachBotAdmin(app) {
 
   app.get("/admin/bot/stats", (_req, res) => res.json(getStats()));
 
-  // Recent activities so clients can fetch initial history (with optional filter)
+  // Single history endpoint with type filter
   app.get("/admin/bot/recent", (req, res) => {
     try {
       const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
@@ -476,17 +522,34 @@ function attachBotAdmin(app) {
     }
   });
 
-  // Trigger immediate BIG WIN
+  // Trigger immediate BIG WIN (and start/extend 6h campaign)
   app.post("/admin/bot/bigwin", (req, res) => {
     try {
       const ev = triggerBigWin(req.body || {});
-      res.json({ ok: true, event: ev });
+      const deadline = BIGWIN_DEADLINE;
+      const remainingMs = deadline > 0 ? Math.max(0, deadline - Date.now()) : 0;
+      res.json({ ok: true, event: ev, deadline, remainingMs });
     } catch (e) {
       res.status(500).json({ error: String(e?.message || e) });
     }
   });
 
-  // Reset stats
+  // Big Win status for frontend countdown/disable
+  app.get("/admin/bot/bigwin/status", (_req, res) => {
+    try {
+      const deadline = BIGWIN_DEADLINE;
+      const remainingMs = deadline > 0 ? Math.max(0, deadline - Date.now()) : 0;
+      res.json({
+        ok: true,
+        active: deadline > 0 && Date.now() < deadline,
+        deadline,
+        remainingMs,
+      });
+    } catch (e) {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
   app.post("/admin/bot/reset-stats", (_req, res) => {
     try {
       resetStats();
