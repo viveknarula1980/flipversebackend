@@ -26,6 +26,42 @@ function maybeRequireAdmin(req, res, next) {
 const lamportsToSol = (n) => Number(n || 0) / 1e9;
 
 // ------------------------------------------------------------------
+// Helper: broadcast latest fake status over Socket.IO (if available)
+async function broadcastFakeStatus(wallet) {
+  try {
+    const io = global.io;
+    if (!io || typeof io.to !== "function") return;
+    if (!wallet) return;
+
+    const [isFake, promoBal, effBal, frozen, withdrawals] = await Promise.all([
+      Promo.isFakeMode(wallet),
+      Promo.getPromoBalanceLamports(wallet),
+      Promo.getEffectiveLamports(wallet),
+      Promo.getFrozenForBetsLamports?.(wallet).catch?.(() => 0) ?? 0,
+      Promo.isUserWithdrawalsEnabled?.(wallet).catch?.(() => true) ?? true,
+    ]);
+
+    io.to(wallet).emit("fake:status", {
+      wallet,
+      isFake: !!isFake,
+      mode: isFake ? "fake" : "real",
+      promoBalanceLamports: Number(promoBal || 0),
+      promoBalanceSol: lamportsToSol(promoBal),
+      effectiveBalanceLamports: Number(effBal || 0),
+      effectiveBalanceSol: lamportsToSol(effBal),
+      frozenLamports: Number(frozen || 0),
+      frozenSol: lamportsToSol(frozen),
+      withdrawalsEnabled: withdrawals !== false,
+    });
+  } catch (e) {
+    console.warn(
+      "[admin_fake_balance_router] broadcastFakeStatus error:",
+      e?.message || e
+    );
+  }
+}
+
+// ------------------------------------------------------------------
 // NEW: simple read endpoints (no auth) used by the frontend hook
 // GET /admin/fake/balance?wallet=...
 router.get("/balance", async (req, res) => {
@@ -149,6 +185,9 @@ router.put("/users/:id/promo-balance", maybeRequireAdmin, async (req, res) => {
       newPromoBalanceLamports: Number(newBal || 0),
       newPromoBalanceSol: lamportsToSol(newBal),
     });
+
+    // push latest status to this wallet over WS
+    broadcastFakeStatus(id);
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
   }
@@ -162,6 +201,9 @@ router.put("/users/:id/fake-mode", maybeRequireAdmin, async (req, res) => {
     const { enabled } = req.body || {};
     const out = await Promo.setFakeMode(id, !!enabled);
     res.json(out);
+
+    // broadcast new status
+    broadcastFakeStatus(id);
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
   }
@@ -178,6 +220,9 @@ router.put("/users/:id/withdrawals", maybeRequireAdmin, async (req, res) => {
       !!withdrawalsEnabled
     );
     res.json(out);
+
+    // broadcast new status
+    broadcastFakeStatus(id);
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
   }
@@ -211,6 +256,9 @@ router.post("/grant", maybeRequireAdmin, async (req, res) => {
       promoBalanceLamports: Number(newBal || 0),
       promoBalanceSol: lamportsToSol(newBal),
     });
+
+    // notify this wallet
+    broadcastFakeStatus(wallet);
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
   }
@@ -241,6 +289,9 @@ router.post("/take", maybeRequireAdmin, async (req, res) => {
       promoBalanceLamports: Number(newBal || 0),
       promoBalanceSol: lamportsToSol(newBal),
     });
+
+    // notify this wallet
+    broadcastFakeStatus(wallet);
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
   }
@@ -262,6 +313,9 @@ router.post("/mode", maybeRequireAdmin, async (req, res) => {
       promoBalanceLamports: Number(bal || 0),
       promoBalanceSol: lamportsToSol(bal),
     });
+
+    // notify this wallet
+    broadcastFakeStatus(wallet);
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
   }

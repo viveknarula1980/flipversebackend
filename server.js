@@ -1094,17 +1094,31 @@ async function main() {
   app.get("/vault/config", (_req, res) => {
     res.json({ withdrawalFeeSol: WITHDRAWAL_FEE_SOL, withdrawalFeeLamports: WITHDRAWAL_FEE_LAMPORTS });
   });
+app.get("/vault/locked", async (req, res) => {
+  try {
+    const wallet = String(req.query.wallet || "");
+    if (!isMaybeBase58(wallet)) return res.status(400).json({ error: "bad wallet" });
 
-  app.get("/vault/locked", async (req, res) => {
-    try {
-      const wallet = String(req.query.wallet || "");
-      if (!isMaybeBase58(wallet)) return res.status(400).json({ error: "bad wallet" });
-      const summary = await computeVaultLock(wallet);
-      res.json(summary);
-    } catch (e) {
-      res.status(500).json({ error: String(e?.message || e) });
-    }
-  });
+    // 🔹 1. Find the user by wallet address
+    const user = await Users.findOne({ walletAddress: wallet });
+
+    // 🔹 2. Compute the existing vault summary
+    const summary = await computeVaultLock(wallet);
+
+    // 🔹 3. Determine whether withdrawals should be enabled
+    const withdrawalsEnabled = user && user.status === "active";
+
+    // 🔹 4. Combine user status + summary and send to frontend
+    res.json({
+      ...summary,
+      status: user ? user.status : "unknown",
+      withdrawalsEnabled,
+    });
+  } catch (e) {
+    console.error("Error in /vault/locked:", e);
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
 
   // ---------- Wallet activity endpoints ----------
   app.post("/wallets/:id/deposit", async (req, res) => {
@@ -1198,7 +1212,7 @@ async function main() {
 
       res.json(out);
     } catch (e) {
-      res.status(500).json({ error: e?.message || String(e) });
+      res.status(500).json({ error: String(e?.message || e) });
     }
   });
 
@@ -1228,6 +1242,11 @@ async function main() {
       methods: ["GET", "POST"],
     },
   });
+
+  // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+  // make io available to routers that want to emit (e.g., admin fake)
+  global.io = io;
+  // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
   try {
     const { attachBotFeed } = require("./bot_engine");
@@ -1491,6 +1510,14 @@ async function main() {
       socket.emit("vault:config", { withdrawalFeeSol: WITHDRAWAL_FEE_SOL, withdrawalFeeLamports: WITHDRAWAL_FEE_LAMPORTS });
     } catch {}
 
+    // join a wallet-specific room so we can target emits
+    try {
+      const w = socket.handshake?.auth?.wallet;
+      if (isMaybeBase58(w)) {
+        socket.join(w);
+      }
+    } catch {}
+
     socket.onAny(async (_event, ...args) => {
       try {
         const w = socket.handshake?.auth?.wallet || extractWalletFromArgs(args);
@@ -1499,6 +1526,42 @@ async function main() {
           socket.disconnect(true);
         }
       } catch {}
+    });
+
+    // Allow client to explicitly join a wallet room
+    socket.on("fake:subscribe", (data) => {
+      try {
+        const w = (data && (data.wallet || data.user || data.player || data.address)) || socket.handshake?.auth?.wallet;
+        if (isMaybeBase58(w)) {
+          socket.join(w);
+        } else {
+          socket.emit("fake:error", { message: "bad wallet" });
+        }
+      } catch (e) {
+        socket.emit("fake:error", { message: String(e?.message || e) });
+      }
+    });
+
+    // Client asks for latest fake/promo status (proxied to HTTP)
+    socket.on("fake:get", async (data) => {
+      try {
+        const w = (data && (data.wallet || data.user || data.player || data.address)) || socket.handshake?.auth?.wallet;
+        if (!isMaybeBase58(w)) {
+          socket.emit("fake:error", { message: "bad wallet" });
+          return;
+        }
+        const url = `http://127.0.0.1:${PORT}/admin/fake/status?wallet=${encodeURIComponent(w)}`;
+        const r = await fetch(url, { timeout: 4000 });
+        if (!r.ok) {
+          const msg = `status ${r.status}`;
+          socket.emit("fake:error", { message: msg });
+          return;
+        }
+        const json = await r.json();
+        socket.emit("fake:status", json);
+      } catch (e) {
+        socket.emit("fake:error", { message: String(e?.message || e) });
+      }
     });
 
     // Prepare withdraw (server enforces permissions + lock + live PDA)
