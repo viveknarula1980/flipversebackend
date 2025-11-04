@@ -1097,21 +1097,22 @@ async function main() {
 app.get("/vault/locked", async (req, res) => {
   try {
     const wallet = String(req.query.wallet || "");
-    if (!isMaybeBase58(wallet)) return res.status(400).json({ error: "bad wallet" });
+    if (!isMaybeBase58(wallet)) {
+      return res.status(400).json({ error: "bad wallet" });
+    }
 
-    // 🔹 1. Find the user by wallet address
-    const user = await Users.findOne({ walletAddress: wallet });
+    // ✅ Get user info from Postgres
+    const user = await db.getUserDetails(wallet);
 
-    // 🔹 2. Compute the existing vault summary
+    // ✅ Compute vault summary (from PDA + welcome lock)
     const summary = await computeVaultLock(wallet);
 
-    // 🔹 3. Determine whether withdrawals should be enabled
-    const withdrawalsEnabled = user && user.status === "active";
+    // ✅ Check if withdrawals are enabled (admin toggle)
+    const withdrawalsEnabled = await db.isUserWithdrawalsEnabled(wallet);
 
-    // 🔹 4. Combine user status + summary and send to frontend
     res.json({
       ...summary,
-      status: user ? user.status : "unknown",
+      status: user ? user.status || "unknown" : "unknown",
       withdrawalsEnabled,
     });
   } catch (e) {
@@ -1119,6 +1120,7 @@ app.get("/vault/locked", async (req, res) => {
     res.status(500).json({ error: String(e?.message || e) });
   }
 });
+
 
   // ---------- Wallet activity endpoints ----------
   app.post("/wallets/:id/deposit", async (req, res) => {
