@@ -1,6 +1,14 @@
-// server.js
 require("dotenv").config();
 
+const path = require("path");
+
+// ✅ Ensure Anchor finds Anchor.toml even if you run from /backend
+// This makes the Anchor workspace root = project root (one level up from backend/)
+process.chdir(path.join(__dirname, ".."));
+
+const anchor = require("@coral-xyz/anchor");
+const { SystemProgram, Keypair, Transaction, sendAndConfirmTransaction } = require("@solana/web3.js");
+const fs = require("fs");
 const http = require("http");
 const { Server } = require("socket.io");
 const express = require("express");
@@ -13,7 +21,6 @@ const {
   TransactionMessage,
   VersionedTransaction,
 } = require("@solana/web3.js");
-const path = require("path");
 const { getMessage } = require("./messageUtil");
 
 // small fetch shim (Node 18+ has global fetch)
@@ -453,7 +460,7 @@ async function main() {
   app.set("trust proxy", true);
 
   // ---------- CORS ----------
-  const defaultAllowed = ["https://api.zoggy.io","http://51.20.249.35:3000","http://localhost:3000"];
+  const defaultAllowed = ["https://api.zoggy.io", "http://51.20.249.35:3000", "http://localhost:3000"];
   const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || defaultAllowed.join(","))
     .split(",")
     .map((s) => s.trim())
@@ -509,10 +516,10 @@ async function main() {
 
       // Always allow these paths
       if (
-        p.startsWith("/admin") ||            // admin endpoints will still be protected by their own middleware
+        p.startsWith("/admin") || // admin endpoints will still be protected by their own middleware
         p.startsWith("/health") ||
         p.startsWith("/uploads") ||
-        p.startsWith("/socket.io") ||        // Socket.IO HTTP transport; WS gate handles enforcement
+        p.startsWith("/socket.io") || // Socket.IO HTTP transport; WS gate handles enforcement
         p.startsWith("/r/") ||
         p.startsWith("/maintenance/status")
       ) {
@@ -575,6 +582,83 @@ async function main() {
       });
     } catch (e) {
       res.status(500).json({ error: String(e.message || e) });
+    }
+  });
+
+  // ---------- ADMIN WITHDRAW (Anchor, same as working script) ----------
+  app.post("/admin/withdraw", async (req, res) => {
+    try {
+      const { playerWallet, amountSol } = req.body || {};
+      const amountSolNum = Number(amountSol);
+
+      if (!playerWallet || !isMaybeBase58(playerWallet)) {
+        return res.status(400).json({ error: "Invalid or missing playerWallet" });
+      }
+      if (!Number.isFinite(amountSolNum) || amountSolNum <= 0) {
+        return res.status(400).json({ error: "Invalid amountSol" });
+      }
+
+      // --- Provider & program: same style as working script ---
+      const provider = anchor.AnchorProvider.env();
+      anchor.setProvider(provider);
+
+      const program = anchor.workspace.Casino;
+      if (!program) {
+        console.error("anchor.workspace.Casino is undefined");
+        return res.status(500).json({
+          error:
+            "anchor.workspace.Casino is undefined. Ensure you are in the Anchor workspace and Casino is built.",
+        });
+      }
+
+      console.log("Program ID (server):", program.programId.toBase58());
+      console.log("Admin wallet (provider):", provider.wallet.publicKey.toBase58());
+
+      // --- Derive vault PDA with ["vault"] seed ---
+      const [houseVault] = anchor.web3.PublicKey.findProgramAddressSync(
+        [Buffer.from("vault")],
+        program.programId
+      );
+
+      console.log("House vault PDA:", houseVault.toBase58());
+
+      const destination = new anchor.web3.PublicKey(playerWallet);
+      console.log("Destination:", destination.toBase58());
+
+      const amountLamports = Math.floor(amountSolNum * LAMPORTS_PER_SOL);
+      if (!Number.isFinite(amountLamports) || amountLamports <= 0) {
+        return res.status(400).json({ error: "amountSol must be > 0" });
+      }
+
+      // Optional: check vault balance (same idea as your script)
+      const hvBalance = await provider.connection.getBalance(houseVault);
+      console.log("House vault balance (lamports):", hvBalance);
+
+      if (hvBalance < amountLamports) {
+        return res.status(400).json({
+          error: `House vault balance too low: has ${hvBalance}, need ${amountLamports}`,
+        });
+      }
+
+      const amount = new anchor.BN(amountLamports);
+
+      // --- Call houseWithdraw exactly like your script ---
+      const txSig = await program.methods
+        .houseWithdraw({ amount })
+        .accounts({
+          admin: provider.wallet.publicKey,
+          houseVault,
+          destination,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([provider.wallet.payer])
+        .rpc();
+
+      console.log("✅ houseWithdraw success, tx:", txSig);
+      return res.json({ success: true, tx: txSig });
+    } catch (err) {
+      console.error("❌ Withdrawal error:", err);
+      return res.status(500).json({ error: err.message || String(err) });
     }
   });
 
@@ -898,7 +982,9 @@ async function main() {
         return res.status(400).json({ error: "type must be 'add' or 'subtract'" });
       }
       const price = await getSolUsd();
-      const deltaLamports = Math.round((amtUsd / (price || USD_PER_SOL_FALLBACK)) * LAMPORTS_PER_SOL);
+      const deltaLamports = Math.round(
+        (amtUsd / (price || USD_PER_SOL_FALLBACK)) * LAMPORTS_PER_SOL
+      );
       const signedDelta = t === "add" ? deltaLamports : -deltaLamports;
 
       await adjustPdaBalanceLamports(id, signedDelta);
@@ -930,7 +1016,9 @@ async function main() {
       try {
         await db.recordActivity({
           user: id,
-          action: `admin_withdrawals_${val ? "enabled" : "disabled"}${reason ? `: ${String(reason).slice(0, 200)}` : ""}`,
+          action: `admin_withdrawals_${val ? "enabled" : "disabled"}${
+            reason ? `: ${String(reason).slice(0, 200)}` : ""
+          }`,
           amount: 0,
         });
       } catch (_) {}
@@ -1006,9 +1094,10 @@ async function main() {
   // Export CSV (USDT + result column)
   app.get("/admin/transactions/export", async (req, res) => {
     try {
-      const { type = "all", status = "all", game = "all", search = "", result = "all" } = req.query || {};
+      const { type = "all", status = "all", game = "all", search = "", result = "all" } =
+        req.query || {};
 
-    const data = await db.listTransactions({
+      const data = await db.listTransactions({
         page: 1,
         limit: 1_000_000,
         type: String(type),
@@ -1094,33 +1183,32 @@ async function main() {
   app.get("/vault/config", (_req, res) => {
     res.json({ withdrawalFeeSol: WITHDRAWAL_FEE_SOL, withdrawalFeeLamports: WITHDRAWAL_FEE_LAMPORTS });
   });
-app.get("/vault/locked", async (req, res) => {
-  try {
-    const wallet = String(req.query.wallet || "");
-    if (!isMaybeBase58(wallet)) {
-      return res.status(400).json({ error: "bad wallet" });
+  app.get("/vault/locked", async (req, res) => {
+    try {
+      const wallet = String(req.query.wallet || "");
+      if (!isMaybeBase58(wallet)) {
+        return res.status(400).json({ error: "bad wallet" });
+      }
+
+      // ✅ Get user info from Postgres
+      const user = await db.getUserDetails(wallet);
+
+      // ✅ Compute vault summary (from PDA + welcome lock)
+      const summary = await computeVaultLock(wallet);
+
+      // ✅ Check if withdrawals are enabled (admin toggle)
+      const withdrawalsEnabled = await db.isUserWithdrawalsEnabled(wallet);
+
+      res.json({
+        ...summary,
+        status: user ? user.status || "unknown" : "unknown",
+        withdrawalsEnabled,
+      });
+    } catch (e) {
+      console.error("Error in /vault/locked:", e);
+      res.status(500).json({ error: String(e?.message || e) });
     }
-
-    // ✅ Get user info from Postgres
-    const user = await db.getUserDetails(wallet);
-
-    // ✅ Compute vault summary (from PDA + welcome lock)
-    const summary = await computeVaultLock(wallet);
-
-    // ✅ Check if withdrawals are enabled (admin toggle)
-    const withdrawalsEnabled = await db.isUserWithdrawalsEnabled(wallet);
-
-    res.json({
-      ...summary,
-      status: user ? user.status || "unknown" : "unknown",
-      withdrawalsEnabled,
-    });
-  } catch (e) {
-    console.error("Error in /vault/locked:", e);
-    res.status(500).json({ error: String(e?.message || e) });
-  }
-});
-
+  });
 
   // ---------- Wallet activity endpoints ----------
   app.post("/wallets/:id/deposit", async (req, res) => {
@@ -1139,7 +1227,12 @@ app.get("/vault/locked", async (req, res) => {
           .json({ error: "amountSol or amountLamports required (> 0)" });
       }
 
-      await db.recordActivity({ user: id, action: "deposit", amount: deltaLamports / 1e9, tx_hash: txHash });
+      await db.recordActivity({
+        user: id,
+        action: "deposit",
+        amount: deltaLamports / 1e9,
+        tx_hash: txHash,
+      });
 
       if (pdaSol != null || pdaLamports != null) {
         const absLamports =
@@ -1175,7 +1268,12 @@ app.get("/vault/locked", async (req, res) => {
           .json({ error: "amountSol or amountLamports required (> 0)" });
       }
 
-      await db.recordActivity({ user: id, action: "withdraw", amount: deltaLamports / 1e9, tx_hash: txHash });
+      await db.recordActivity({
+        user: id,
+        action: "withdraw",
+        amount: deltaLamports / 1e9,
+        tx_hash: txHash,
+      });
 
       if (pdaSol != null || pdaLamports != null) {
         const absLamports =
@@ -1245,10 +1343,8 @@ app.get("/vault/locked", async (req, res) => {
     },
   });
 
-  // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
   // make io available to routers that want to emit (e.g., admin fake)
   global.io = io;
-  // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
   try {
     const { attachBotFeed } = require("./bot_engine");
@@ -1256,7 +1352,7 @@ app.get("/vault/locked", async (req, res) => {
   } catch {}
 
   // -------------------------
-  // PERSISTENT ADMIN SETTINGS (unchanged except mounts)
+  // PERSISTENT ADMIN SETTINGS
   // -------------------------
   try {
     const bcrypt = require("bcrypt");
@@ -1274,7 +1370,9 @@ app.get("/vault/locked", async (req, res) => {
         console.warn("[ensureAdminSettingsTable] failed:", err?.message || err);
       }
     }
-    ensureAdminSettingsTable().catch((e) => console.warn("[admin_settings init] error:", e?.message || e));
+    ensureAdminSettingsTable().catch((e) =>
+      console.warn("[admin_settings init] error:", e?.message || e)
+    );
 
     async function readAdminSetting(key) {
       const { rows } = await db.pool.query(
@@ -1296,14 +1394,17 @@ app.get("/vault/locked", async (req, res) => {
     function requireAdmin(req, res, next) {
       try {
         if (!process.env.ADMIN_API_KEY) {
-          console.warn("[requireAdmin] WARNING: ADMIN_API_KEY not set — admin endpoints are open (dev mode)");
+          console.warn(
+            "[requireAdmin] WARNING: ADMIN_API_KEY not set — admin endpoints are open (dev mode)"
+          );
           return next();
         }
-        const auth = (req.headers["authorization"] || "");
+        const auth = req.headers["authorization"] || "";
         const m = String(auth).match(/^Bearer\s+(.+)$/i);
         if (!m) return res.status(401).json({ error: "missing authorization" });
         const token = m[1];
-        if (token !== process.env.ADMIN_API_KEY) return res.status(403).json({ error: "forbidden" });
+        if (token !== process.env.ADMIN_API_KEY)
+          return res.status(403).json({ error: "forbidden" });
         return next();
       } catch (e) {
         return next(e);
@@ -1376,7 +1477,9 @@ app.get("/vault/locked", async (req, res) => {
           if (Object.prototype.hasOwnProperty.call(patch, k)) cur[k] = patch[k];
         }
         await writeAdminSetting("admin_profile", cur);
-        try { io.emit("admin.user.updated", cur); } catch (e) {}
+        try {
+          io.emit("admin.user.updated", cur);
+        } catch (e) {}
         return res.json(cur);
       } catch (e) {
         return res.status(500).json({ error: String(e?.message || e) });
@@ -1392,8 +1495,12 @@ app.get("/vault/locked", async (req, res) => {
 
         const creds = await getAdminCredentials();
         if (creds.passwordHash) {
-          if (!currentPassword) return res.status(400).json({ error: "currentPassword required" });
-          const ok = await bcrypt.compare(String(currentPassword), String(creds.passwordHash));
+          if (!currentPassword)
+            return res.status(400).json({ error: "currentPassword required" });
+          const ok = await bcrypt.compare(
+            String(currentPassword),
+            String(creds.passwordHash)
+          );
           if (!ok) return res.status(403).json({ error: "currentPassword incorrect" });
         }
 
@@ -1445,7 +1552,9 @@ app.get("/vault/locked", async (req, res) => {
         }
 
         await writeAdminSetting(MAINT_KEY, cur);
-        try { io.emit("admin.maintenance.updated", cur); } catch (e) {}
+        try {
+          io.emit("admin.maintenance.updated", cur);
+        } catch (e) {}
         return res.json(cur);
       } catch (e) {
         return res.status(500).json({ error: String(e?.message || e) });
@@ -1457,7 +1566,9 @@ app.get("/vault/locked", async (req, res) => {
         const cur = await getMaintenanceConfig();
         cur.isEnabled = !Boolean(cur.isEnabled);
         await writeAdminSetting(MAINT_KEY, cur);
-        try { io.emit("admin.maintenance.updated", cur); } catch (e) {}
+        try {
+          io.emit("admin.maintenance.updated", cur);
+        } catch (e) {}
         return res.json(cur);
       } catch (e) {
         return res.status(500).json({ error: String(e?.message || e) });
@@ -1489,9 +1600,15 @@ app.get("/vault/locked", async (req, res) => {
       if (!active) return next();
 
       // Admin bypass via Authorization header or handshake auth
-      const hdrToken = String(socket.handshake?.headers?.authorization || "").replace(/^Bearer\s+/i, "");
+      const hdrToken = String(
+        socket.handshake?.headers?.authorization || ""
+      ).replace(/^Bearer\s+/i, "");
       const authToken = socket.handshake?.auth?.adminToken || hdrToken || "";
-      if (cfg.allowAdminAccess && process.env.ADMIN_API_KEY && authToken === process.env.ADMIN_API_KEY) {
+      if (
+        cfg.allowAdminAccess &&
+        process.env.ADMIN_API_KEY &&
+        authToken === process.env.ADMIN_API_KEY
+      ) {
         return next();
       }
       return next(new Error("MAINTENANCE_MODE"));
@@ -1504,12 +1621,17 @@ app.get("/vault/locked", async (req, res) => {
   try {
     solanaAnchorIx = require("./solana_anchor_ix");
   } catch (e) {
-    console.warn("[server] solana_anchor_ix helper not found. Ensure ./solana_anchor_ix.js exists and exports ixWithdraw().");
+    console.warn(
+      "[server] solana_anchor_ix helper not found. Ensure ./solana_anchor_ix.js exists and exports ixWithdraw()."
+    );
   }
 
   io.on("connection", (socket) => {
     try {
-      socket.emit("vault:config", { withdrawalFeeSol: WITHDRAWAL_FEE_SOL, withdrawalFeeLamports: WITHDRAWAL_FEE_LAMPORTS });
+      socket.emit("vault:config", {
+        withdrawalFeeSol: WITHDRAWAL_FEE_SOL,
+        withdrawalFeeLamports: WITHDRAWAL_FEE_LAMPORTS,
+      });
     } catch {}
 
     // join a wallet-specific room so we can target emits
@@ -1533,7 +1655,10 @@ app.get("/vault/locked", async (req, res) => {
     // Allow client to explicitly join a wallet room
     socket.on("fake:subscribe", (data) => {
       try {
-        const w = (data && (data.wallet || data.user || data.player || data.address)) || socket.handshake?.auth?.wallet;
+        const w =
+          (data &&
+            (data.wallet || data.user || data.player || data.address)) ||
+          socket.handshake?.auth?.wallet;
         if (isMaybeBase58(w)) {
           socket.join(w);
         } else {
@@ -1547,12 +1672,17 @@ app.get("/vault/locked", async (req, res) => {
     // Client asks for latest fake/promo status (proxied to HTTP)
     socket.on("fake:get", async (data) => {
       try {
-        const w = (data && (data.wallet || data.user || data.player || data.address)) || socket.handshake?.auth?.wallet;
+        const w =
+          (data &&
+            (data.wallet || data.user || data.player || data.address)) ||
+          socket.handshake?.auth?.wallet;
         if (!isMaybeBase58(w)) {
           socket.emit("fake:error", { message: "bad wallet" });
           return;
         }
-        const url = `http://127.0.0.1:${PORT}/admin/fake/status?wallet=${encodeURIComponent(w)}`;
+        const url = `http://127.0.0.1:${PORT}/admin/fake/status?wallet=${encodeURIComponent(
+          w
+        )}`;
         const r = await fetch(url, { timeout: 4000 });
         if (!r.ok) {
           const msg = `status ${r.status}`;
@@ -1584,7 +1714,9 @@ app.get("/vault/locked", async (req, res) => {
         }
         // must withdraw to self
         if (withdrawAddress !== player) {
-          socket.emit("vault:error", { message: "withdraw address must equal player wallet" });
+          socket.emit("vault:error", {
+            message: "withdraw address must equal player wallet",
+          });
           return;
         }
         if (!Number.isFinite(amountLamports) || amountLamports <= 0) {
@@ -1602,7 +1734,9 @@ app.get("/vault/locked", async (req, res) => {
         const lock = await computeVaultLock(player);
         const allowedLamports = Math.max(0, lock.withdrawableLamports);
         if (amountLamports > allowedLamports) {
-          socket.emit("vault:error", { message: "requested amount exceeds withdrawable balance" });
+          socket.emit("vault:error", {
+            message: "requested amount exceeds withdrawable balance",
+          });
           return;
         }
 
@@ -1615,7 +1749,10 @@ app.get("/vault/locked", async (req, res) => {
         }
 
         if (!solanaAnchorIx || typeof solanaAnchorIx.ixWithdraw !== "function") {
-          socket.emit("vault:error", { message: "server missing withdraw instruction builder (solana_anchor_ix.ixWithdraw)" });
+          socket.emit("vault:error", {
+            message:
+              "server missing withdraw instruction builder (solana_anchor_ix.ixWithdraw)",
+          });
           return;
         }
 
@@ -1644,10 +1781,16 @@ app.get("/vault/locked", async (req, res) => {
             tx_hash: null,
           });
         } catch (e) {
-          console.warn("[db.recordActivity] withdraw_prepare failed:", e?.message || e);
+          console.warn(
+            "[db.recordActivity] withdraw_prepare failed:",
+            e?.message || e
+          );
         }
 
-        socket.emit("vault:withdraw_tx", { transactionBase64: txBase64, requestId: data?.clientRequestId || null });
+        socket.emit("vault:withdraw_tx", {
+          transactionBase64: txBase64,
+          requestId: data?.clientRequestId || null,
+        });
       } catch (err) {
         console.error("[vault:withdraw_prepare] error:", err?.message || err);
         try {
@@ -1678,12 +1821,16 @@ app.get("/vault/locked", async (req, res) => {
       console.warn(`${name} WS not found / failed to mount:`, e?.message || e);
     }
   }
-  try { require("./dice_ws").attachDiceRoutes?.(app); } catch (e) { console.warn("dice routes not mounted:", e?.message || e); }
+  try {
+    require("./dice_ws").attachDiceRoutes?.(app);
+  } catch (e) {
+    console.warn("dice routes not mounted:", e?.message || e);
+  }
 
   // New: pass both io and app so the /dice/* REST routes are mounted
   try {
     const dice = require("./dice_ws");
-    await dice.ensureDiceSchema?.().catch(() => {}); // make sure columns exist
+    await dice.ensureDiceSchema?.().catch(() => {});
     dice.attachDice?.(io, app);
     console.log("Dice WS + routes mounted");
   } catch (e) {
@@ -1754,19 +1901,19 @@ app.get("/vault/locked", async (req, res) => {
   });
 
   try {
-  const winsFeed = require("./ws_wins");
-  winsFeed.attachWinsFeed(io);
-  global.pushWinEvent = winsFeed.pushWinEvent; // optional global helper
-  console.log("Wins feed mounted");
-} catch (e) {
-  console.warn("ws_wins not found:", e?.message || e);
-}
+    const winsFeed = require("./ws_wins");
+    winsFeed.attachWinsFeed(io);
+    global.pushWinEvent = winsFeed.pushWinEvent;
+    console.log("Wins feed mounted");
+  } catch (e) {
+    console.warn("ws_wins not found:", e?.message || e);
+  }
 
   // Other WS modules
   try {
     const slots = require("./slots_ws");
-    slots.attachSlots(io);           // WS
-    slots.attachSlotsRoutes(app);    // HTTP: /slots and /api/slots
+    slots.attachSlots(io);
+    slots.attachSlotsRoutes(app);
     console.log("Slots WS + HTTP mounted");
   } catch (e) {
     console.warn("slots_ws not found / failed to mount:", e?.message || e);
@@ -1783,14 +1930,12 @@ app.get("/vault/locked", async (req, res) => {
   try {
     const plinko = require("./plinko_ws");
     await plinko.ensurePlinkoSchema?.().catch(() => {});
-    plinko.attachPlinko?.(io, app);   // mounts WS + REST (/plinko/resolved)
+    plinko.attachPlinko?.(io, app);
     console.log("Plinko WS + routes mounted");
   } catch (e) {
     console.warn("Plinko mount failed:", e?.message || e);
   }
-  // Dice: already mounted above with io + app
 
-  // Coinflip: mount WS + REST and ensure schema
   try {
     const coinflip = require("./coinflip_ws");
     await coinflip.ensureCoinflipSchema?.().catch(() => {});

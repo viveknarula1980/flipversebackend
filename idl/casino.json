@@ -1,0 +1,3122 @@
+{
+  "accounts": [
+    {
+      "discriminator": [
+        156,
+        10,
+        79,
+        161,
+        71,
+        9,
+        62,
+        77
+      ],
+      "name": "AdminConfig"
+    },
+    {
+      "discriminator": [
+        66,
+        252,
+        25,
+        251,
+        45,
+        157,
+        108,
+        224
+      ],
+      "name": "PendingCrash"
+    },
+    {
+      "discriminator": [
+        152,
+        40,
+        204,
+        32,
+        164,
+        127,
+        150,
+        168
+      ],
+      "name": "PendingDice"
+    },
+    {
+      "discriminator": [
+        196,
+        4,
+        205,
+        59,
+        107,
+        133,
+        172,
+        11
+      ],
+      "name": "PendingFlip"
+    },
+    {
+      "discriminator": [
+        236,
+        117,
+        0,
+        186,
+        53,
+        66,
+        60,
+        89
+      ],
+      "name": "PendingMines"
+    },
+    {
+      "discriminator": [
+        168,
+        93,
+        33,
+        167,
+        159,
+        249,
+        123,
+        228
+      ],
+      "name": "PendingPlinko"
+    },
+    {
+      "discriminator": [
+        76,
+        59,
+        68,
+        221,
+        238,
+        222,
+        169,
+        76
+      ],
+      "name": "PendingSlots"
+    },
+    {
+      "discriminator": [
+        23,
+        76,
+        96,
+        159,
+        210,
+        10,
+        5,
+        22
+      ],
+      "name": "UserVault"
+    }
+  ],
+  "address": "5vgLU8GyehUkziMaKHCtyPu6YZgo11wct8rTHLdz4z1",
+  "errors": [
+    {
+      "code": 6000,
+      "msg": "Invalid ed25519 pre-instruction",
+      "name": "InvalidEd25519"
+    },
+    {
+      "code": 6001,
+      "msg": "Expired signature/nonce",
+      "name": "Expired"
+    },
+    {
+      "code": 6002,
+      "msg": "Bad params",
+      "name": "BadParams"
+    },
+    {
+      "code": 6003,
+      "msg": "Vault mismatch",
+      "name": "VaultMismatch"
+    },
+    {
+      "code": 6004,
+      "msg": "Insufficient vault balance",
+      "name": "InsufficientVault"
+    },
+    {
+      "code": 6005,
+      "msg": "Payout sanity check failed",
+      "name": "BadPayout"
+    },
+    {
+      "code": 6006,
+      "msg": "Already settled or not found",
+      "name": "BadPending"
+    }
+  ],
+  "events": [
+    {
+      "discriminator": [
+        178,
+        68,
+        201,
+        217,
+        187,
+        84,
+        176,
+        235
+      ],
+      "name": "CrashLocked"
+    },
+    {
+      "discriminator": [
+        59,
+        45,
+        74,
+        100,
+        78,
+        216,
+        81,
+        227
+      ],
+      "name": "CrashResolved"
+    },
+    {
+      "discriminator": [
+        83,
+        34,
+        64,
+        3,
+        201,
+        39,
+        117,
+        255
+      ],
+      "name": "DiceLocked"
+    },
+    {
+      "discriminator": [
+        216,
+        15,
+        76,
+        163,
+        132,
+        33,
+        62,
+        82
+      ],
+      "name": "DiceResolved"
+    },
+    {
+      "discriminator": [
+        188,
+        162,
+        200,
+        140,
+        174,
+        216,
+        188,
+        52
+      ],
+      "name": "FlipLocked"
+    },
+    {
+      "discriminator": [
+        42,
+        161,
+        38,
+        229,
+        162,
+        18,
+        99,
+        57
+      ],
+      "name": "FlipResolved"
+    },
+    {
+      "discriminator": [
+        207,
+        57,
+        254,
+        62,
+        148,
+        108,
+        100,
+        178
+      ],
+      "name": "HouseWithdrawn"
+    },
+    {
+      "discriminator": [
+        147,
+        16,
+        220,
+        69,
+        114,
+        210,
+        219,
+        51
+      ],
+      "name": "MinesLocked"
+    },
+    {
+      "discriminator": [
+        140,
+        5,
+        10,
+        43,
+        57,
+        209,
+        28,
+        23
+      ],
+      "name": "MinesResolved"
+    },
+    {
+      "discriminator": [
+        205,
+        109,
+        249,
+        137,
+        7,
+        152,
+        42,
+        60
+      ],
+      "name": "PlinkoLocked"
+    },
+    {
+      "discriminator": [
+        121,
+        249,
+        4,
+        101,
+        35,
+        255,
+        238,
+        202
+      ],
+      "name": "PlinkoResolved"
+    },
+    {
+      "discriminator": [
+        82,
+        55,
+        24,
+        136,
+        147,
+        149,
+        28,
+        88
+      ],
+      "name": "SlotsLocked"
+    },
+    {
+      "discriminator": [
+        81,
+        188,
+        2,
+        58,
+        209,
+        201,
+        7,
+        77
+      ],
+      "name": "SlotsResolved"
+    }
+  ],
+  "instructions": [
+    {
+      "accounts": [
+        {
+          "name": "player",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "ActivateArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        206,
+        42,
+        182,
+        219,
+        174,
+        102,
+        115,
+        64
+      ],
+      "name": "activate_user_vault"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player"
+        },
+        {
+          "name": "fee_payer",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  114,
+                  97,
+                  115,
+                  104
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              },
+              {
+                "kind": "arg",
+                "path": "args.nonce"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        },
+        {
+          "address": "Sysvar1nstructions1111111111111111111111111",
+          "docs": [
+            "CHECK"
+          ],
+          "name": "sysvar_instructions"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "CrashLockArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        170,
+        112,
+        48,
+        62,
+        92,
+        76,
+        201,
+        69
+      ],
+      "name": "crash_lock"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player",
+          "writable": true
+        },
+        {
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "admin_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  114,
+                  97,
+                  115,
+                  104
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              },
+              {
+                "account": "PendingCrash",
+                "kind": "account",
+                "path": "pending.nonce"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        },
+        {
+          "address": "Sysvar1nstructions1111111111111111111111111",
+          "docs": [
+            "CHECK"
+          ],
+          "name": "sysvar_instructions"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "CrashResolveArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        75,
+        244,
+        103,
+        129,
+        254,
+        180,
+        243,
+        37
+      ],
+      "name": "crash_resolve"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "DepositArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        18,
+        62,
+        110,
+        8,
+        26,
+        106,
+        248,
+        151
+      ],
+      "name": "deposit_to_vault"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player"
+        },
+        {
+          "name": "fee_payer",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              },
+              {
+                "kind": "arg",
+                "path": "args.nonce"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        },
+        {
+          "address": "Sysvar1nstructions1111111111111111111111111",
+          "docs": [
+            "CHECK"
+          ],
+          "name": "sysvar_instructions"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "DiceLockArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        110,
+        226,
+        174,
+        228,
+        80,
+        4,
+        9,
+        114
+      ],
+      "name": "dice_lock"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player",
+          "writable": true
+        },
+        {
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "admin_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              },
+              {
+                "account": "PendingDice",
+                "kind": "account",
+                "path": "pending.nonce"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        },
+        {
+          "address": "Sysvar1nstructions1111111111111111111111111",
+          "docs": [
+            "CHECK"
+          ],
+          "name": "sysvar_instructions"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "DiceResolveArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        38,
+        210,
+        108,
+        113,
+        1,
+        118,
+        222,
+        115
+      ],
+      "name": "dice_resolve"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player"
+        },
+        {
+          "name": "fee_payer",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  108,
+                  105,
+                  112
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              },
+              {
+                "kind": "arg",
+                "path": "args.nonce"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        },
+        {
+          "address": "Sysvar1nstructions1111111111111111111111111",
+          "docs": [
+            "CHECK"
+          ],
+          "name": "sysvar_instructions"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "FlipLockArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        0,
+        153,
+        238,
+        231,
+        149,
+        241,
+        212,
+        92
+      ],
+      "name": "flip_lock"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player",
+          "writable": true
+        },
+        {
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "admin_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  108,
+                  105,
+                  112
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              },
+              {
+                "account": "PendingFlip",
+                "kind": "account",
+                "path": "pending.nonce"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        },
+        {
+          "address": "Sysvar1nstructions1111111111111111111111111",
+          "docs": [
+            "CHECK"
+          ],
+          "name": "sysvar_instructions"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "FlipResolveArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        224,
+        27,
+        181,
+        154,
+        232,
+        191,
+        240,
+        53
+      ],
+      "name": "flip_resolve"
+    },
+    {
+      "accounts": [
+        {
+          "docs": [
+            "Admin signer (must match hard-coded ADMIN_PUBKEY_BYTES)"
+          ],
+          "name": "admin",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "docs": [
+            "House vault PDA"
+          ],
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "docs": [
+            "Where funds go – can be ANY wallet"
+          ],
+          "name": "destination",
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "HouseWithdrawArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        91,
+        80,
+        134,
+        212,
+        232,
+        189,
+        132,
+        39
+      ],
+      "name": "house_withdraw"
+    },
+    {
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "name": "admin_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "admin_pubkey",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ],
+      "discriminator": [
+        97,
+        65,
+        97,
+        27,
+        200,
+        206,
+        72,
+        219
+      ],
+      "name": "init_admin"
+    },
+    {
+      "accounts": [
+        {
+          "name": "payer",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        }
+      ],
+      "args": [],
+      "discriminator": [
+        82,
+        247,
+        65,
+        25,
+        166,
+        239,
+        30,
+        112
+      ],
+      "name": "init_house_vault"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player"
+        },
+        {
+          "name": "fee_payer",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  117,
+                  110,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              },
+              {
+                "kind": "arg",
+                "path": "args.nonce"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        },
+        {
+          "address": "Sysvar1nstructions1111111111111111111111111",
+          "docs": [
+            "CHECK"
+          ],
+          "name": "sysvar_instructions"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "MinesLockArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        101,
+        80,
+        171,
+        11,
+        130,
+        3,
+        209,
+        3
+      ],
+      "name": "mines_lock"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player",
+          "writable": true
+        },
+        {
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "admin_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  117,
+                  110,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              },
+              {
+                "account": "PendingMines",
+                "kind": "account",
+                "path": "pending.nonce"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        },
+        {
+          "address": "Sysvar1nstructions1111111111111111111111111",
+          "docs": [
+            "CHECK"
+          ],
+          "name": "sysvar_instructions"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "MinesResolveArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        19,
+        64,
+        239,
+        151,
+        85,
+        72,
+        52,
+        32
+      ],
+      "name": "mines_resolve"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player"
+        },
+        {
+          "name": "fee_payer",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  105,
+                  110,
+                  107,
+                  111,
+                  98,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              },
+              {
+                "kind": "arg",
+                "path": "args.nonce"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        },
+        {
+          "address": "Sysvar1nstructions1111111111111111111111111",
+          "docs": [
+            "CHECK"
+          ],
+          "name": "sysvar_instructions"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "PlinkoLockArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        75,
+        240,
+        100,
+        114,
+        146,
+        242,
+        174,
+        111
+      ],
+      "name": "plinko_lock"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player",
+          "writable": true
+        },
+        {
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "admin_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  105,
+                  110,
+                  107,
+                  111,
+                  98,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              },
+              {
+                "account": "PendingPlinko",
+                "kind": "account",
+                "path": "pending.nonce"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        },
+        {
+          "address": "Sysvar1nstructions1111111111111111111111111",
+          "docs": [
+            "CHECK"
+          ],
+          "name": "sysvar_instructions"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "PlinkoResolveArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        53,
+        105,
+        194,
+        155,
+        193,
+        113,
+        64,
+        225
+      ],
+      "name": "plinko_resolve"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player"
+        },
+        {
+          "name": "fee_payer",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  112,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              },
+              {
+                "kind": "arg",
+                "path": "args.nonce"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        },
+        {
+          "address": "Sysvar1nstructions1111111111111111111111111",
+          "docs": [
+            "CHECK"
+          ],
+          "name": "sysvar_instructions"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "SlotsLockArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        71,
+        187,
+        22,
+        140,
+        121,
+        119,
+        132,
+        195
+      ],
+      "name": "slots_lock"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player",
+          "writable": true
+        },
+        {
+          "name": "house_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "admin_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  112,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              },
+              {
+                "account": "PendingSlots",
+                "kind": "account",
+                "path": "pending.nonce"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        },
+        {
+          "address": "Sysvar1nstructions1111111111111111111111111",
+          "docs": [
+            "CHECK"
+          ],
+          "name": "sysvar_instructions"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "SlotsResolveArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        73,
+        187,
+        59,
+        35,
+        76,
+        38,
+        123,
+        24
+      ],
+      "name": "slots_resolve"
+    },
+    {
+      "accounts": [
+        {
+          "docs": [
+            "Hard-coded admin must sign to rotate admin_config"
+          ],
+          "name": "authority",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "name": "admin_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              }
+            ]
+          },
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "new_admin_pubkey",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ],
+      "discriminator": [
+        161,
+        176,
+        40,
+        213,
+        60,
+        184,
+        179,
+        228
+      ],
+      "name": "update_admin"
+    },
+    {
+      "accounts": [
+        {
+          "name": "player",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "name": "user_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          },
+          "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "name": "system_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "WithdrawArgs"
+            }
+          }
+        }
+      ],
+      "discriminator": [
+        180,
+        34,
+        37,
+        46,
+        156,
+        0,
+        211,
+        238
+      ],
+      "name": "withdraw_from_vault"
+    }
+  ],
+  "metadata": {
+    "description": "Created with Anchor",
+    "name": "casino",
+    "spec": "0.1.0",
+    "version": "0.1.0"
+  },
+  "types": [
+    {
+      "name": "ActivateArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "initial_deposit",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "AdminConfig",
+      "type": {
+        "fields": [
+          {
+            "name": "admin_pubkey",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "CrashLockArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "bet_amount",
+            "type": "u64"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "expiry_unix",
+            "type": "i64"
+          },
+          {
+            "name": "ed25519_instr_index",
+            "type": "u8"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "CrashLocked",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "CrashResolveArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "multiplier_bps",
+            "type": "u32"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          },
+          {
+            "name": "ed25519_instr_index",
+            "type": "u8"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "CrashResolved",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "multiplier_bps",
+            "type": "u32"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "DepositArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "DiceLockArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "bet_amount",
+            "type": "u64"
+          },
+          {
+            "name": "bet_type",
+            "type": "u8"
+          },
+          {
+            "name": "target",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "expiry_unix",
+            "type": "i64"
+          },
+          {
+            "name": "ed25519_instr_index",
+            "type": "u8"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "DiceLocked",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "bet_type",
+            "type": "u8"
+          },
+          {
+            "name": "target",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "DiceResolveArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "roll",
+            "type": "u8"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          },
+          {
+            "name": "ed25519_instr_index",
+            "type": "u8"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "DiceResolved",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "win",
+            "type": "bool"
+          },
+          {
+            "name": "roll",
+            "type": "u8"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "FlipLockArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "bet_amount",
+            "type": "u64"
+          },
+          {
+            "name": "side",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "expiry_unix",
+            "type": "i64"
+          },
+          {
+            "name": "ed25519_instr_index",
+            "type": "u8"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "FlipLocked",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "side",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "FlipResolveArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "winner_side",
+            "type": "u8"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          },
+          {
+            "name": "ed25519_instr_index",
+            "type": "u8"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "FlipResolved",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "winner_side",
+            "type": "u8"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "HouseWithdrawArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "HouseWithdrawn",
+      "type": {
+        "fields": [
+          {
+            "name": "to",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "MinesLockArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "bet_amount",
+            "type": "u64"
+          },
+          {
+            "name": "rows",
+            "type": "u8"
+          },
+          {
+            "name": "cols",
+            "type": "u8"
+          },
+          {
+            "name": "mines",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "expiry_unix",
+            "type": "i64"
+          },
+          {
+            "name": "ed25519_instr_index",
+            "type": "u8"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "MinesLocked",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "rows",
+            "type": "u8"
+          },
+          {
+            "name": "cols",
+            "type": "u8"
+          },
+          {
+            "name": "mines",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "MinesResolveArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "checksum",
+            "type": "u8"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          },
+          {
+            "name": "ed25519_instr_index",
+            "type": "u8"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "MinesResolved",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          },
+          {
+            "name": "checksum",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "PendingCrash",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "expiry_unix",
+            "type": "i64"
+          },
+          {
+            "name": "settled",
+            "type": "bool"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "PendingDice",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "bet_type",
+            "type": "u8"
+          },
+          {
+            "name": "target",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "expiry_unix",
+            "type": "i64"
+          },
+          {
+            "name": "settled",
+            "type": "bool"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "PendingFlip",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "side",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "expiry_unix",
+            "type": "i64"
+          },
+          {
+            "name": "settled",
+            "type": "bool"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "PendingMines",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "rows",
+            "type": "u8"
+          },
+          {
+            "name": "cols",
+            "type": "u8"
+          },
+          {
+            "name": "mines",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "expiry_unix",
+            "type": "i64"
+          },
+          {
+            "name": "settled",
+            "type": "bool"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "PendingPlinko",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "unit_amount",
+            "type": "u64"
+          },
+          {
+            "name": "balls",
+            "type": "u16"
+          },
+          {
+            "name": "rows",
+            "type": "u8"
+          },
+          {
+            "name": "difficulty",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "expiry_unix",
+            "type": "i64"
+          },
+          {
+            "name": "settled",
+            "type": "bool"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "PendingSlots",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "expiry_unix",
+            "type": "i64"
+          },
+          {
+            "name": "settled",
+            "type": "bool"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "PlinkoLockArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "unit_amount",
+            "type": "u64"
+          },
+          {
+            "name": "balls",
+            "type": "u16"
+          },
+          {
+            "name": "rows",
+            "type": "u8"
+          },
+          {
+            "name": "difficulty",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "expiry_unix",
+            "type": "i64"
+          },
+          {
+            "name": "ed25519_instr_index",
+            "type": "u8"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "PlinkoLocked",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "unit_amount",
+            "type": "u64"
+          },
+          {
+            "name": "balls",
+            "type": "u16"
+          },
+          {
+            "name": "rows",
+            "type": "u8"
+          },
+          {
+            "name": "difficulty",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "PlinkoResolveArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "checksum",
+            "type": "u8"
+          },
+          {
+            "name": "total_payout",
+            "type": "u64"
+          },
+          {
+            "name": "ed25519_instr_index",
+            "type": "u8"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "PlinkoResolved",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "total_payout",
+            "type": "u64"
+          },
+          {
+            "name": "checksum",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "SlotsLockArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "bet_amount",
+            "type": "u64"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "expiry_unix",
+            "type": "i64"
+          },
+          {
+            "name": "ed25519_instr_index",
+            "type": "u8"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "SlotsLocked",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "SlotsResolveArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "checksum",
+            "type": "u8"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          },
+          {
+            "name": "ed25519_instr_index",
+            "type": "u8"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "SlotsResolved",
+      "type": {
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          },
+          {
+            "name": "checksum",
+            "type": "u8"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "UserVault",
+      "type": {
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "_r1",
+            "type": {
+              "array": [
+                "u8",
+                7
+              ]
+            }
+          },
+          {
+            "name": "_r2",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "_r3",
+            "type": "i64"
+          },
+          {
+            "name": "_r4",
+            "type": "u64"
+          },
+          {
+            "name": "_r5",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    },
+    {
+      "name": "WithdrawArgs",
+      "type": {
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ],
+        "kind": "struct"
+      }
+    }
+  ]
+}

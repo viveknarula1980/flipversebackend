@@ -15,9 +15,10 @@ const DB = global.db || require("./db");
 const Promo = require("./promo_balance");
 const { pushWinEvent } = require("./ws_wins");
 
-
 let precheckOrThrow = async () => {};
-try { ({ precheckOrThrow } = require("./bonus_guard")); } catch (_) {}
+try {
+  ({ precheckOrThrow } = require("./bonus_guard"));
+} catch (_) {}
 
 const {
   connection,
@@ -95,29 +96,37 @@ async function promoFreeze(wallet, amountLamports) {
   try {
     return await Promo.freezeForBet({ wallet, amountLamports, gameKey: "coinflip" });
   } catch {
-    try { return await Promo.freezeForBet(wallet, amountLamports); } catch { return false; }
+    try {
+      return await Promo.freezeForBet(wallet, amountLamports);
+    } catch {
+      return false;
+    }
   }
 }
 async function promoSettle(wallet, payoutLamports, win) {
   try {
     return await Promo.settleBet({ wallet, payoutLamports, win, gameKey: "coinflip" });
   } catch {
-    try { return await Promo.settleBet(wallet, payoutLamports); } catch { return false; }
+    try {
+      return await Promo.settleBet(wallet, payoutLamports);
+    } catch {
+      return false;
+    }
   }
 }
 
 // ---------- on-chain lock for a single player ----------
 async function serverLock({ playerPk, side, stakeLamports, nonce, expiryUnix }) {
-  const feePayer  = await getServerKeypair();
+  const feePayer = await getServerKeypair();
   const userVault = deriveUserVaultPda(playerPk);
-  const houseVault= deriveVaultPda();
-  const pending   = derivePendingFlipPda(playerPk, nonce);
+  const houseVault = deriveVaultPda();
+  const pending = derivePendingFlipPda(playerPk, nonce);
 
   const msg = Buffer.from(
     `FLIP_LOCK|${playerPk.toBase58()}|${stakeLamports}|${side}|${nonce}|${expiryUnix}`
   );
   const edSig = await signMessageEd25519(msg);
-  const edIx  = buildEd25519VerifyIx({ message: msg, signature: edSig, publicKey: ADMIN_PK });
+  const edIx = buildEd25519VerifyIx({ message: msg, signature: edSig, publicKey: ADMIN_PK });
 
   const cuLimit = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
   const edIndex = 2;
@@ -151,7 +160,10 @@ async function serverLock({ playerPk, side, stakeLamports, nonce, expiryUnix }) 
   }
 
   vtx.sign([feePayer]);
-  const sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
+  const sig = await connection.sendRawTransaction(vtx.serialize(), {
+    skipPreflight: false,
+    maxRetries: 5,
+  });
   await connection.confirmTransaction(sig, "confirmed");
 
   return { pending: pending.toBase58(), txSig: sig };
@@ -159,17 +171,17 @@ async function serverLock({ playerPk, side, stakeLamports, nonce, expiryUnix }) 
 
 // ---------- on-chain resolve for a single player ----------
 async function serverResolve({ playerPk, winnerSide, payoutLamports, nonce }) {
-  const feePayer  = await getServerKeypair();
+  const feePayer = await getServerKeypair();
   const userVault = deriveUserVaultPda(playerPk);
-  const houseVault= deriveVaultPda();
-  const adminPda  = deriveAdminPda();
-  const pending   = derivePendingFlipPda(playerPk, nonce);
+  const houseVault = deriveVaultPda();
+  const adminPda = deriveAdminPda();
+  const pending = derivePendingFlipPda(playerPk, nonce);
 
   const rmsg = Buffer.from(
     `FLIP_RESOLVE|${playerPk.toBase58()}|${nonce}|${winnerSide}|${payoutLamports}`
   );
   const edSig = await signMessageEd25519(rmsg);
-  const edIx  = buildEd25519VerifyIx({ message: rmsg, signature: edSig, publicKey: ADMIN_PK });
+  const edIx = buildEd25519VerifyIx({ message: rmsg, signature: edSig, publicKey: ADMIN_PK });
 
   const cuLimit = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
   const edIndex = 1;
@@ -197,11 +209,16 @@ async function serverResolve({ playerPk, winnerSide, payoutLamports, nonce }) {
   const sim = await connection.simulateTransaction(vtx, { sigVerify: false });
   if (sim.value.err) {
     const logs = (sim.value.logs || []).join("\n");
-    throw new Error(`coinflip resolve simulate failed: ${JSON.stringify(sim.value.err)}\n${logs}`);
+    throw new Error(
+      `coinflip resolve simulate failed: ${JSON.stringify(sim.value.err)}\n${logs}`
+    );
   }
 
   vtx.sign([feePayer]);
-  const sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false, maxRetries: 5 });
+  const sig = await connection.sendRawTransaction(vtx.serialize(), {
+    skipPreflight: false,
+    maxRetries: 5,
+  });
   await connection.confirmTransaction(sig, "confirmed");
   return sig;
 }
@@ -213,7 +230,8 @@ const rooms = new Map();
 
 async function createRoom(io, A, B) {
   const nonce = Date.now();
-  const expiryUnix = Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
+  const expiryUnix =
+    Math.floor(Date.now() / 1000) + Number(process.env.NONCE_TTL_SECONDS || 300);
 
   const serverSeed = crypto.randomBytes(32);
   const serverSeedHash = sha256Hex(serverSeed);
@@ -235,8 +253,13 @@ async function createRoom(io, A, B) {
   });
 
   // Winner is fully determined by outcome & sides; we can compute it now
-  const winnerKeyInit = sameSide ? (outcome === 0 ? "A" : "B")
-                                 : (outcome === Number(A.side) ? "A" : "B");
+  const winnerKeyInit = sameSide
+    ? outcome === 0
+      ? "A"
+      : "B"
+    : outcome === Number(A.side)
+    ? "A"
+    : "B";
   const winnerBase58Init = winnerKeyInit === "A" ? A_pk.toBase58() : B_pk.toBase58();
 
   rooms.set(nonce, {
@@ -269,18 +292,20 @@ async function createRoom(io, A, B) {
   });
 
   // Notify
-  if (A.socketId) io.to(A.socketId).emit("coinflip:matched", {
-    nonce: String(nonce),
-    you: A.side === 0 ? "heads" : "tails",
-    opponentSide: B.side,
-    opponent: B.isBot ? "bot" : "human",
-  });
-  if (B.socketId) io.to(B.socketId).emit("coinflip:matched", {
-    nonce: String(nonce),
-    you: B.side === 0 ? "heads" : "tails",
-    opponentSide: A.side,
-    opponent: A.isBot ? "bot" : "human",
-  });
+  if (A.socketId)
+    io.to(A.socketId).emit("coinflip:matched", {
+      nonce: String(nonce),
+      you: A.side === 0 ? "heads" : "tails",
+      opponentSide: B.side,
+      opponent: B.isBot ? "bot" : "human",
+    });
+  if (B.socketId)
+    io.to(B.socketId).emit("coinflip:matched", {
+      nonce: String(nonce),
+      you: B.side === 0 ? "heads" : "tails",
+      opponentSide: A.side,
+      opponent: A.isBot ? "bot" : "human",
+    });
 
   // Lock phase
   if (!eitherFake) {
@@ -323,7 +348,11 @@ async function createRoom(io, A, B) {
     if (R.A.fakeMode && !R.A.isBot) {
       const okA = await promoFreeze(R.A.wallet, entryLamports);
       if (!okA) {
-        if (A.socketId) io.to(A.socketId).emit("coinflip:error", { code: "FAKE_BALANCE_LOW", message: "Insufficient promo balance" });
+        if (A.socketId)
+          io.to(A.socketId).emit("coinflip:error", {
+            code: "FAKE_BALANCE_LOW",
+            message: "Insufficient promo balance",
+          });
         rooms.delete(nonce);
         return;
       }
@@ -331,7 +360,11 @@ async function createRoom(io, A, B) {
     if (R.B.fakeMode && !R.B.isBot) {
       const okB = await promoFreeze(R.B.wallet, entryLamports);
       if (!okB) {
-        if (B.socketId) io.to(B.socketId).emit("coinflip:error", { code: "FAKE_BALANCE_LOW", message: "Insufficient promo balance" });
+        if (B.socketId)
+          io.to(B.socketId).emit("coinflip:error", {
+            code: "FAKE_BALANCE_LOW",
+            message: "Insufficient promo balance",
+          });
         rooms.delete(nonce);
         return;
       }
@@ -357,7 +390,8 @@ async function createRoom(io, A, B) {
   try {
     if (typeof DB.pool?.query === "function") {
       await DB.pool.query(
-        `INSERT INTO coinflip_matches
+        `
+        INSERT INTO coinflip_matches
            (nonce, player_a, player_b, side_a, side_b, bet_lamports,
             outcome, winner, status,
             server_seed_hash, server_seed, first_hmac_hex,
@@ -415,7 +449,7 @@ async function createRoom(io, A, B) {
 
   // Winner/loser (consistent with init decision)
   const winnerKey = winnerKeyInit;
-  const loserKey  = winnerKey === "A" ? "B" : "A";
+  const loserKey = winnerKey === "A" ? "B" : "A";
 
   // Resolve
   let sigWin = null;
@@ -423,9 +457,19 @@ async function createRoom(io, A, B) {
 
   if (!eitherFake) {
     const winnerPk = rooms.get(nonce)[winnerKey].playerPk;
-    const loserPk  = rooms.get(nonce)[loserKey].playerPk;
-    sigWin = await serverResolve({ playerPk: winnerPk, winnerSide: outcome, payoutLamports: payout, nonce });
-    sigLos = await serverResolve({ playerPk: loserPk,  winnerSide: outcome, payoutLamports: 0n,    nonce });
+    const loserPk = rooms.get(nonce)[loserKey].playerPk;
+    sigWin = await serverResolve({
+      playerPk: winnerPk,
+      winnerSide: outcome,
+      payoutLamports: payout,
+      nonce,
+    });
+    sigLos = await serverResolve({
+      playerPk: loserPk,
+      winnerSide: outcome,
+      payoutLamports: 0n,
+      nonce,
+    });
   } else {
     const R = rooms.get(nonce);
     const win = R[winnerKey];
@@ -438,36 +482,42 @@ async function createRoom(io, A, B) {
 
   // Persist final
   try {
-    await DB.recordCoinflipMatch?.({
-      nonce: Number(nonce),
-      player_a: A_pk.toBase58(),
-      player_b: B_pk.toBase58(),
-      side_a: Number(A.side),
-      side_b: Number(B.side),
-      bet_lamports: Number(entryLamports),
-      outcome: Number(outcome),
-      winner: winnerBase58Init,
-      payout_lamports: Number(payout),
-      fee_bps: feeBps,
-      resolve_sig_winner: sigWin,
-      resolve_sig_loser: sigLos,
-    }).catch(() => {});
+    await DB.recordCoinflipMatch
+      ?.({
+        nonce: Number(nonce),
+        player_a: A_pk.toBase58(),
+        player_b: B_pk.toBase58(),
+        side_a: Number(A.side),
+        side_b: Number(B.side),
+        bet_lamports: Number(entryLamports),
+        outcome: Number(outcome),
+        winner: winnerBase58Init,
+        payout_lamports: Number(payout),
+        fee_bps: feeBps,
+        resolve_sig_winner: sigWin,
+        resolve_sig_loser: sigLos,
+      })
+      .catch(() => {});
 
     if (typeof DB.pool?.query === "function") {
       await DB.pool.query(
-        `UPDATE coinflip_matches
+        `
+        UPDATE coinflip_matches
             SET outcome=$1, winner=$2, payout_lamports=$3, fee_bps=$4, status='resolved',
                 resolve_sig_winner=$5, resolve_sig_loser=$6, resolved_at=now()
-          WHERE nonce=$7`,
-        [ Number(outcome), winnerBase58Init, Number(payout), feeBps, sigWin, sigLos, BigInt(nonce) ]
+          WHERE nonce=$7
+        `,
+        [Number(outcome), winnerBase58Init, Number(payout), feeBps, sigWin, sigLos, BigInt(nonce)]
       );
     }
 
-    await DB.recordActivity?.({
-      user: winnerBase58Init,
-      action: eitherFake ? "Coinflip win (fake)" : "Coinflip win",
-      amount: (Number(payout) / 1e9).toFixed(4),
-    }).catch(() => {});
+    await DB.recordActivity
+      ?.({
+        user: winnerBase58Init,
+        action: eitherFake ? "Coinflip win (fake)" : "Coinflip win",
+        amount: (Number(payout) / 1e9).toFixed(4),
+      })
+      .catch(() => {});
   } catch (e) {
     console.warn("[coinflip] DB save warn:", e?.message || e);
   }
@@ -479,39 +529,41 @@ async function createRoom(io, A, B) {
     feeLamports: Number(fee),
     payoutLamports: Number(payout),
     txWinner: sigWin,
-    txLoser:  sigLos,
+    txLoser: sigLos,
   };
-  if (rooms.get(nonce).A.socketId) io.to(rooms.get(nonce).A.socketId).emit("coinflip:resolved", resultPayload);
-  if (rooms.get(nonce).B.socketId) io.to(rooms.get(nonce).B.socketId).emit("coinflip:resolved", resultPayload);
+  if (rooms.get(nonce)?.A.socketId)
+    io.to(rooms.get(nonce).A.socketId).emit("coinflip:resolved", resultPayload);
+  if (rooms.get(nonce)?.B.socketId)
+    io.to(rooms.get(nonce).B.socketId).emit("coinflip:resolved", resultPayload);
+
   // ---- pushWinEvent like dice ----
-try {
-  const amountSol = Number(entryLamports) / 1e9;
-  const payoutSol = Number(payout) / 1e9;
+  try {
+    const amountSol = Number(entryLamports) / 1e9;
+    const payoutSol = Number(payout) / 1e9;
 
-  // winner
-  pushWinEvent({
-    user: winnerBase58Init,
-    game: "coinflip",
-    amountSol,
-    payoutSol,
-    result: payoutSol > amountSol ? "win" : "loss",
-  });
+    // winner
+    pushWinEvent({
+      user: winnerBase58Init,
+      game: "coinflip",
+      amountSol,
+      payoutSol,
+      result: payoutSol > amountSol ? "win" : "loss",
+    });
 
-  // loser
-  const loserWallet =
-    winnerBase58Init === A_pk.toBase58() ? B_pk.toBase58() : A_pk.toBase58();
+    // loser
+    const loserWallet =
+      winnerBase58Init === A_pk.toBase58() ? B_pk.toBase58() : A_pk.toBase58();
 
-  pushWinEvent({
-    user: loserWallet,
-    game: "coinflip",
-    amountSol,
-    payoutSol: 0,
-    result: "loss",
-  });
-} catch (err) {
-  console.warn("[coinflip] pushWinEvent failed:", err?.message || err);
-}
-
+    pushWinEvent({
+      user: loserWallet,
+      game: "coinflip",
+      amountSol,
+      payoutSol: 0,
+      result: "loss",
+    });
+  } catch (err) {
+    console.warn("[coinflip] pushWinEvent failed:", err?.message || err);
+  }
 
   // PF reveal
   try {
@@ -522,7 +574,8 @@ try {
       serverSeedHash: r.serverSeedHash,
       clientSeedA: r.A.clientSeed || "",
       clientSeedB: r.B.clientSeed || "",
-      formula: "HMAC_SHA256(serverSeed, clientSeedA + '|' + clientSeedB + '|' + nonce) -> first byte & 1",
+      formula:
+        "HMAC_SHA256(serverSeed, clientSeedA + '|' + clientSeedB + '|' + nonce) -> first byte & 1",
       firstHmacHex: r.firstHmacHex,
     };
     if (r.A.socketId) io.to(r.A.socketId).emit("coinflip:reveal_seed", revealPayload);
@@ -535,7 +588,10 @@ try {
 }
 
 // ---------------- REST: /coinflip/resolved ----------------
-async function dbListCoinflipResolvedByWallet(wallet, { limit = 50, cursor = null } = {}) {
+async function dbListCoinflipResolvedByWallet(
+  wallet,
+  { limit = 50, cursor = null } = {}
+) {
   if (!DB?.pool) return { items: [], nextCursor: null };
   const L = Math.max(1, Math.min(200, Number(limit) || 50));
   const baseWhere = `status='resolved' AND (player_a = $1 OR player_b = $1)`;
@@ -595,12 +651,14 @@ function attachCoinflipRoutes(app) {
       const wallet = String(req.query.wallet || "");
       const limit = req.query.limit;
       const cursor = req.query.cursor;
-      if (!wallet || wallet.length < 32) return res.status(400).json({ error: "bad wallet" });
+      if (!wallet || wallet.length < 32)
+        return res.status(400).json({ error: "bad wallet" });
 
       await ensureCoinflipSchema().catch(() => {});
       const out = await dbListCoinflipResolvedByWallet(wallet, { limit, cursor });
       out.verify = {
-        algorithm: "HMAC_SHA256(serverSeed, clientSeedA + '|' + clientSeedB + '|' + nonce) -> first byte & 1",
+        algorithm:
+          "HMAC_SHA256(serverSeed, clientSeedA + '|' + clientSeedB + '|' + nonce) -> first byte & 1",
       };
       res.json(out);
     } catch (e) {
@@ -613,11 +671,17 @@ function attachCoinflipRoutes(app) {
 
 // ---------------- Attach ----------------
 function attachCoinflip(io, app /* optional */) {
-  ensureCoinflipSchema().catch((e) => console.warn("[ensureCoinflipSchema] warn:", e?.message || e));
-  try { attachCoinflipRoutes(app); } catch (_) {}
+  ensureCoinflipSchema().catch((e) =>
+    console.warn("[ensureCoinflipSchema] warn:", e?.message || e)
+  );
+  try {
+    attachCoinflipRoutes(app);
+  } catch (_) {}
 
   io.on("connection", (socket) => {
-    socket.on("register", ({ player }) => { socket.data.player = String(player || "guest"); });
+    socket.on("register", ({ player }) => {
+      socket.data.player = String(player || "guest");
+    });
 
     socket.on("disconnect", () => {
       const idx = waiting.findIndex((w) => w.socketId === socket.id);
@@ -630,18 +694,33 @@ function attachCoinflip(io, app /* optional */) {
 
     socket.on("coinflip:join", async ({ player, side, entryLamports, clientSeed }) => {
       try {
-        if (!player) return socket.emit("coinflip:error", { code: "NO_PLAYER", message: "player required" });
+        if (!player)
+          return socket.emit("coinflip:error", {
+            code: "NO_PLAYER",
+            message: "player required",
+          });
 
         const cfg = await DB.getGameConfig?.("coinflip");
         if (cfg && (!cfg.enabled || !cfg.running)) {
-          return socket.emit("coinflip:error", { code: "DISABLED", message: "Coinflip disabled by admin" });
+          return socket.emit("coinflip:error", {
+            code: "DISABLED",
+            message: "Coinflip disabled by admin",
+          });
         }
         const min = BigInt(cfg?.min_bet_lamports ?? 50000n);
         const max = BigInt(cfg?.max_bet_lamports ?? 5_000_000_000n);
 
         const stake = BigInt(entryLamports || 0);
-        if (!(stake > 0n)) return socket.emit("coinflip:error", { code: "BAD_BET", message: "entryLamports must be > 0" });
-        if (stake < min || stake > max) return socket.emit("coinflip:error", { code: "BET_RANGE", message: "Bet outside allowed range" });
+        if (!(stake > 0n))
+          return socket.emit("coinflip:error", {
+            code: "BAD_BET",
+            message: "entryLamports must be > 0",
+          });
+        if (stake < min || stake > max)
+          return socket.emit("coinflip:error", {
+            code: "BET_RANGE",
+            message: "Bet outside allowed range",
+          });
 
         const s = clamp(Number(side), 0, 1);
         const playerPk = new PublicKey(player);
@@ -655,13 +734,36 @@ function attachCoinflip(io, app /* optional */) {
           });
         }
 
-        // match by stake and mode
-        let oppIdx = waiting.findIndex(
-          (w) => w.entryLamports === String(stake) && Number(w.side) !== s && !!w.fakeMode === !!fakeMode
-        );
-        if (oppIdx < 0) {
+        // ✅ Match by stake + mode, but:
+        // - Real players: only opposite sides (heads vs tails).
+        // - Fake/promo players: allow same side first, then opposite as fallback.
+        let oppIdx = -1;
+
+        if (fakeMode) {
+          // Fake/promo: try same-side first
           oppIdx = waiting.findIndex(
-            (w) => w.entryLamports === String(stake) && Number(w.side) === s && !!w.fakeMode === !!fakeMode
+            (w) =>
+              w.entryLamports === String(stake) &&
+              !!w.fakeMode === !!fakeMode &&
+              Number(w.side) === s
+          );
+
+          if (oppIdx < 0) {
+            // Fallback to opposite side if no same-side promo found
+            oppIdx = waiting.findIndex(
+              (w) =>
+                w.entryLamports === String(stake) &&
+                !!w.fakeMode === !!fakeMode &&
+                Number(w.side) !== s
+            );
+          }
+        } else {
+          // Real players: opposite sides ONLY
+          oppIdx = waiting.findIndex(
+            (w) =>
+              w.entryLamports === String(stake) &&
+              !!w.fakeMode === !!fakeMode &&
+              Number(w.side) !== s
           );
         }
 
@@ -727,15 +829,24 @@ function attachCoinflip(io, app /* optional */) {
             isBot: true,
             fakeMode: !!fakeMode,
           };
-          try { await createRoom(io, A, B); }
-          catch (e) { io.to(socket.id).emit("coinflip:error", { code: "BOT_FAIL", message: String(e.message || e) }); }
+          try {
+            await createRoom(io, A, B);
+          } catch (e) {
+            io.to(socket.id).emit("coinflip:error", {
+              code: "BOT_FAIL",
+              message: String(e.message || e),
+            });
+          }
         }, QUEUE_TTL_MS);
 
         waiting.push(w);
         socket.emit("coinflip:queued", { side: s, entryLamports: String(stake) });
       } catch (e) {
         console.error("coinflip:join error:", e);
-        socket.emit("coinflip:error", { code: "JOIN_FAIL", message: e.message || String(e) });
+        socket.emit("coinflip:error", {
+          code: "JOIN_FAIL",
+          message: e.message || String(e),
+        });
       }
     });
   });
