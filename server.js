@@ -424,9 +424,20 @@ function isWindowActive(cfg) {
   const now = Date.now();
   const st = cfg.scheduledStart ? Date.parse(cfg.scheduledStart) : NaN;
   const en = cfg.scheduledEnd ? Date.parse(cfg.scheduledEnd) : NaN;
+
+  // Start from manual toggle
   let active = Boolean(cfg.isEnabled);
-  if (Number.isFinite(st) && now >= st && (!Number.isFinite(en) || now < en)) active = true;
-  if (Number.isFinite(en) && now >= en && !cfg.isEnabled) active = false;
+
+  // If inside scheduled window → active
+  if (Number.isFinite(st) && now >= st && (!Number.isFinite(en) || now < en)) {
+    active = true;
+  }
+
+  // ✅ Once end time passes → inactive (auto-off)
+  if (Number.isFinite(en) && now >= en) {
+    active = false;
+  }
+
   return active;
 }
 function isAdminAuthorized(req) {
@@ -493,66 +504,67 @@ async function main() {
   console.log("[CORS] Allowed origins:", ALLOW_ORIGINS);
 
   // ---------- Health ----------
-  app.get("/health", (_req, res) => {
-    res.json({ ok: true, cluster: CLUSTER, programId: PROGRAM_ID.toBase58() });
-  });
-  app.get("/health/all", (_req, res) => {
-    res.json({
-      ok: true,
-      cluster: CLUSTER,
-      dice_program: PROGRAM_ID.toBase58(),
-      crash_program: CRASH_PROGRAM_ID || null,
-      plinko_program: PLINKO_PROGRAM_ID || null,
-      coinflip_program: COINFLIP_PROGRAM_ID || null,
-    });
-  });
-
   // =======================
-  // Maintenance Enforcement (global)
-  // =======================
-  app.use(async (req, res, next) => {
-    try {
-      const p = req.path || req.url || "";
+// Maintenance Enforcement (global)
+// =======================
+app.use(async (req, res, next) => {
+  try {
+    const p = req.path || req.url || "";
 
-      // Always allow these paths
-      if (
-        p.startsWith("/admin") || // admin endpoints will still be protected by their own middleware
-        p.startsWith("/health") ||
-        p.startsWith("/uploads") ||
-        p.startsWith("/socket.io") || // Socket.IO HTTP transport; WS gate handles enforcement
-        p.startsWith("/r/") ||
-        p.startsWith("/maintenance/status")
-      ) {
-        return next();
-      }
-
-      const cfg = await getMaintCached();
-      const active = isWindowActive(cfg);
-      res.setHeader("x-maintenance-active", String(active));
-
-      if (!active) return next();
-
-      // Allow admin override by token even outside /admin (e.g., ad-hoc checks)
-      if (cfg.allowAdminAccess && isAdminAuthorized(req)) return next();
-
-      const retryAfter = String(computeRetryAfterSeconds(cfg));
-
-      if (req.method === "GET" && wantsHtml(req)) {
-        res.setHeader("Retry-After", retryAfter);
-        return res.status(302).redirect(buildMaintenanceUrl(cfg.redirectUrl));
-      }
-
-      res.setHeader("Retry-After", retryAfter);
-      return res.status(503).json({
-        maintenance: true,
-        message: cfg.message || "Site is under maintenance.",
-        scheduledStart: cfg.scheduledStart || null,
-        scheduledEnd: cfg.scheduledEnd || null,
-      });
-    } catch (e) {
-      return next(e);
+    // Always allow these paths
+    if (
+      p.startsWith("/admin") || // admin endpoints will still be protected by their own middleware
+      p.startsWith("/health") ||
+      p.startsWith("/uploads") ||
+      p.startsWith("/socket.io") || // Socket.IO HTTP transport; WS gate handles enforcement
+      p.startsWith("/r/") ||
+      p.startsWith("/maintenance/status")
+    ) {
+      return next();
     }
-  });
+
+    const cfg = await getMaintCached();
+    const active = isWindowActive(cfg);
+    res.setHeader("x-maintenance-active", String(active));
+
+    // ✅ Auto-disable maintenance in DB once the window has expired
+    if (cfg.scheduledEnd && Date.now() >= Date.parse(cfg.scheduledEnd) && cfg.isEnabled) {
+      cfg.isEnabled = false;
+      try {
+        await db.pool.query(
+          `update admin_settings set value = $2, updated_at = now() where key = $1`,
+          ['maintenance', cfg]
+        );
+        console.log('[auto-disable maintenance] maintenance mode turned off after scheduled end');
+      } catch (e) {
+        console.warn('[auto-disable maintenance] failed:', e?.message || e);
+      }
+    }
+
+    if (!active) return next();
+
+    // Allow admin override by token even outside /admin (e.g., ad-hoc checks)
+    if (cfg.allowAdminAccess && isAdminAuthorized(req)) return next();
+
+    const retryAfter = String(computeRetryAfterSeconds(cfg));
+
+    if (req.method === "GET" && wantsHtml(req)) {
+      res.setHeader("Retry-After", retryAfter);
+      return res.status(302).redirect(buildMaintenanceUrl(cfg.redirectUrl));
+    }
+
+    res.setHeader("Retry-After", retryAfter);
+    return res.status(503).json({
+      maintenance: true,
+      message: cfg.message || "Site is under maintenance.",
+      scheduledStart: cfg.scheduledStart || null,
+      scheduledEnd: cfg.scheduledEnd || null,
+    });
+  } catch (e) {
+    return next(e);
+  }
+});
+
 
   // Small public status endpoint (frontend can poll)
   app.get("/maintenance/status", async (_req, res) => {
