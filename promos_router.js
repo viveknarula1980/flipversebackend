@@ -486,27 +486,40 @@ router.post("/chest/daily/claim", async (req, res) => {
   try {
     const userWallet = normalizeWallet(req.body?.userWallet);
     const deviceId = req.body?.deviceId ? String(req.body.deviceId) : null;
-    if (!userWallet) return res.status(400).json({ error: "userWallet is required" });
+    if (!userWallet)
+      return res.status(400).json({ error: "userWallet is required" });
 
     const today = utcDate();
     const ymd = dateToYMD(today);
+
+    // Must wager once today
     if (!(await didWagerOnDate(userWallet, ymd))) {
-      return res.status(400).json({ error: "must wager at least once today to unlock daily chest" });
+      return res
+        .status(400)
+        .json({ error: "must wager at least once today to unlock daily chest" });
     }
 
+    // Prevent duplicate claims
     const dupe = await db.pool.query(
       `select 1 from promos_claims where type='daily' and user_wallet=$1 and date_utc=$2 limit 1`,
       [String(userWallet), ymd]
     );
-    if (dupe.rows.length) return res.status(409).json({ error: "already claimed today" });
+    if (dupe.rows.length)
+      return res.status(409).json({ error: "already claimed today" });
 
+    // Anti-farm: 1 per IP/device/day
     const ip = String(getClientIp(req) || "");
     const ok = await antiFarmGate({ type: "daily", ymd, ip, deviceId });
-    if (!ok) return res.status(429).json({ error: "limit: one chest per IP/device per day" });
+    if (!ok)
+      return res
+        .status(429)
+        .json({ error: "limit: one chest per IP/device per day" });
 
+    // --- select random prize ---
     const prize_key = pickWeighted(DAILY_PRIZES);
     const details = prizeDetailsFromKey(prize_key);
 
+    // --- record claim ---
     const ins = await db.pool.query(
       `insert into promos_claims(type, user_wallet, date_utc, ip, device_id, prize_key, details)
        values ('daily', $1, $2, $3, $4, $5, $6)
@@ -514,6 +527,29 @@ router.post("/chest/daily/claim", async (req, res) => {
       [String(userWallet), ymd, ip, deviceId, prize_key, JSON.stringify(details)]
     );
 
+    // --- NEW: if prize is free spins, credit to welcome_bonus_states ---
+    if (details && details.type === "free_spins") {
+      const count = Number(details.count || 0);
+      const valueUsd = Number(details.valueUsd || 0);
+      const maxWinUsd = Number(
+        details.maxWinUsd || count * valueUsd * 10 || 0
+      );
+
+      if (count > 0 && valueUsd > 0) {
+        await db.pool.query(
+          `insert into welcome_bonus_states (user_wallet, name, fs_count, fs_value_usd, fs_max_win_usd)
+           values ($1,$2,$3,$4,$5)
+           on conflict (user_wallet, name) do update
+             set fs_count = welcome_bonus_states.fs_count + excluded.fs_count,
+                 fs_value_usd = excluded.fs_value_usd,
+                 fs_max_win_usd = excluded.fs_max_win_usd,
+                 status = 'active'`,
+          [String(userWallet), "ZOGGY_WELCOME_400", count, valueUsd, maxWinUsd]
+        );
+      }
+    }
+
+    // --- respond ---
     res.json({
       ok: true,
       prize: prize_key,
@@ -525,6 +561,8 @@ router.post("/chest/daily/claim", async (req, res) => {
     res.status(500).json({ error: e?.message || String(e) });
   }
 });
+
+
 router.get("/chest/weekly/eligibility", async (req, res) => {
   try {
     const wallet = normalizeWallet(req.query.wallet);
@@ -567,39 +605,49 @@ router.get("/chest/weekly/eligibility", async (req, res) => {
   }
 });
 
-
 router.post("/chest/weekly/claim", async (req, res) => {
   try {
     const userWallet = normalizeWallet(req.body?.userWallet);
     const deviceId = req.body?.deviceId ? String(req.body.deviceId) : null;
-    if (!userWallet) return res.status(400).json({ error: "userWallet is required" });
+    if (!userWallet)
+      return res.status(400).json({ error: "userWallet is required" });
 
     // require 7 consecutive daily chests
     for (let i = 0; i < 7; i++) {
-      const d = utcDate(); d.setUTCDate(d.getUTCDate() - i);
+      const d = utcDate();
+      d.setUTCDate(d.getUTCDate() - i);
       const ymd = dateToYMD(d);
       const { rows } = await db.pool.query(
         `select 1 from promos_claims where type='daily' and user_wallet=$1 and date_utc=$2 limit 1`,
         [String(userWallet), ymd]
       );
-      if (!rows.length) return res.status(400).json({ error: "requires 7 daily chests in a row" });
+      if (!rows.length)
+        return res
+          .status(400)
+          .json({ error: "requires 7 daily chests in a row" });
     }
 
     const today = utcDate();
     const ymd = dateToYMD(today);
     const week_key = isoWeekKey(today);
 
+    // prevent duplicate weekly claim
     const already = await db.pool.query(
       `select 1 from promos_claims where type='weekly' and user_wallet=$1 and week_key=$2 limit 1`,
       [String(userWallet), week_key]
     );
-    if (already.rows.length) return res.status(409).json({ error: "already claimed this week" });
+    if (already.rows.length)
+      return res.status(409).json({ error: "already claimed this week" });
 
-    // anti-farm (per day still applies)
+    // anti-farm (still one per IP/device/day)
     const ip = String(getClientIp(req) || "");
     const ok = await antiFarmGate({ type: "weekly", ymd, ip, deviceId });
-    if (!ok) return res.status(429).json({ error: "limit: one chest per IP/device per day" });
+    if (!ok)
+      return res
+        .status(429)
+        .json({ error: "limit: one chest per IP/device per day" });
 
+    // select prize + store claim
     const prize_key = pickWeighted(WEEKLY_PRIZES);
     const details = prizeDetailsFromKey(prize_key);
 
@@ -610,6 +658,29 @@ router.post("/chest/weekly/claim", async (req, res) => {
       [String(userWallet), ymd, ip, deviceId, prize_key, JSON.stringify(details), week_key]
     );
 
+    // --- NEW: credit free spins into welcome_bonus_states if applicable ---
+    if (details && details.type === "free_spins") {
+      const count = Number(details.count || 0);
+      const valueUsd = Number(details.valueUsd || 0);
+      const maxWinUsd = Number(
+        details.maxWinUsd || count * valueUsd * 10 || 0
+      );
+
+      if (count > 0 && valueUsd > 0) {
+        await db.pool.query(
+          `insert into welcome_bonus_states (user_wallet, name, fs_count, fs_value_usd, fs_max_win_usd)
+           values ($1,$2,$3,$4,$5)
+           on conflict (user_wallet, name) do update
+             set fs_count = welcome_bonus_states.fs_count + excluded.fs_count,
+                 fs_value_usd = excluded.fs_value_usd,
+                 fs_max_win_usd = excluded.fs_max_win_usd,
+                 status = 'active'`,
+          [String(userWallet), "ZOGGY_WELCOME_400", count, valueUsd, maxWinUsd]
+        );
+      }
+    }
+
+    // success response
     res.json({
       ok: true,
       prize: prize_key,
@@ -621,6 +692,7 @@ router.post("/chest/weekly/claim", async (req, res) => {
     res.status(500).json({ error: e?.message || String(e) });
   }
 });
+
 
 // ---------- Admin: Chests ----------
 router.get("/admin/chests", async (req, res) => {
