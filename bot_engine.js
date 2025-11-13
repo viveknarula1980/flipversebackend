@@ -14,6 +14,8 @@
 //   /admin/bot/bigwin/status (GET)
 //   /admin/bot/reset-stats (POST)
 
+const db = require("./db"); // reuse existing Postgres pool
+
 const DEFAULT_CONFIG = {
   enabled: process.env.DEMO_FEED_ENABLED === "true",
   minMs: 2000,
@@ -68,7 +70,8 @@ const STATS = {
   usersSeen: new Map(),
 };
 
-// Recent buffer
+// Recent buffer (used as a fallback + for live “memory”)
+// NOTE: main “recent” endpoints will now read from DB.
 const MAX_RECENT = 200;
 const RECENT = []; // keep newest at end
 
@@ -83,7 +86,8 @@ function _filterType(ev, type) {
   return true; // 'all'
 }
 
-function getRecentActivities(limit = 50, type = "all") {
+// ---- old in-memory helper (used only as fallback) ----
+function _getRecentFromMemory(limit = 50, type = "all") {
   const pool = RECENT.filter((e) => _filterType(e, type));
   const slice = pool.slice(-Math.max(0, Math.min(limit, pool.length)));
   // return newest-first
@@ -147,6 +151,124 @@ function _decorateFlags(ev) {
   return ev;
 }
 
+// ========= DB persistence for feed events =========
+// Make sure you have this table in schema.sql:
+//
+// create table if not exists bot_feed_events (
+//   id          bigserial primary key,
+//   ts_ms       bigint not null,
+//   user_name   text not null,
+//   game_key    text not null,
+//   amount_sol  numeric not null default 0,
+//   result      text not null,
+//   multiplier  numeric not null default 0,
+//   payout_sol  numeric not null default 0,
+//   is_bigwin   boolean not null default false,
+//   is_jackpot  boolean not null default false,
+//   simulated   boolean not null default true,
+//   created_at  timestamptz not null default now()
+// );
+// create index if not exists idx_bot_feed_events_ts on bot_feed_events(ts_ms desc);
+// create index if not exists idx_bot_feed_events_bigwin on bot_feed_events(is_bigwin);
+// create index if not exists idx_bot_feed_events_jackpot on bot_feed_events(is_jackpot);
+
+function persistFeedEvent(ev) {
+  try {
+    if (!db || !db.pool) return;
+
+    const sql = `
+      insert into bot_feed_events (
+        user_name,
+        game_key,
+        amount_sol,
+        result,
+        multiplier,
+        payout_sol,
+        is_bigwin,
+        is_jackpot,
+        simulated,
+        ts_ms
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    `;
+
+    const values = [
+      String(ev.user || ""),
+      String(ev.game || ""),
+      Number(ev.amountSol || 0),
+      String(ev.result || ""),
+      Number(ev.multiplier || 0),
+      Number(ev.payoutSol || 0),
+      !!ev.bigwin,
+      !!ev.jackpot,
+      !!ev.simulated,
+      Number(ev.ts || Date.now()),
+    ];
+
+    db.pool
+      .query(sql, values)
+      .catch((err) =>
+        console.warn("[bot_engine] persistFeedEvent error:", err?.message || err)
+      );
+  } catch (e) {
+    try {
+      console.warn("[bot_engine] persistFeedEvent outer error:", e?.message || e);
+    } catch {}
+  }
+}
+
+// ========= NEW: get recents FROM DB (with fallback to memory) =========
+async function getRecentActivities(limit = 50, type = "all") {
+  const safeLimit = Math.max(1, Math.min(200, Number(limit) || 50));
+
+  if (!db || !db.pool) {
+    // fallback: in-memory only
+    return _getRecentFromMemory(safeLimit, type);
+  }
+
+  let where = [];
+  if (type === "bigwin") where.push("is_bigwin = true");
+  else if (type === "jackpot") where.push("is_jackpot = true");
+
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const sql = `
+    select
+      ts_ms                         as "ts",
+      user_name                     as "user",
+      game_key                      as "game",
+      amount_sol::float8            as "amountSol",
+      result,
+      multiplier::float8            as "multiplier",
+      payout_sol::float8            as "payoutSol",
+      is_bigwin                     as "bigwin",
+      is_jackpot                    as "jackpot",
+      simulated
+    from bot_feed_events
+    ${whereSql}
+    order by ts_ms desc
+    limit $1
+  `;
+
+  try {
+    const { rows } = await db.pool.query(sql, [safeLimit]);
+    // Already newest-first from DB (desc by ts_ms)
+    return rows.map((r) => ({
+      simulated: !!r.simulated,
+      ts: Number(r.ts || Date.now()),
+      user: r.user,
+      game: r.game,
+      amountSol: Number(r.amountSol || 0),
+      result: r.result,
+      multiplier: Number(r.multiplier || 0),
+      payoutSol: Number(r.payoutSol || 0),
+      bigwin: !!r.bigwin,
+      jackpot: !!r.jackpot,
+    }));
+  } catch (e) {
+    console.warn("[bot_engine] getRecentActivities DB error, falling back to memory:", e?.message || e);
+    return _getRecentFromMemory(safeLimit, type);
+  }
+}
+
 // ----- Event generation (normal flow) -----
 function generateEvent() {
   const user = pick(CONFIG.players);
@@ -190,6 +312,10 @@ function _loopOnce() {
   const ev = generateEvent();
   _updateStats(ev);
   pushRecent(ev);
+
+  // persist to DB (fire-and-forget)
+  persistFeedEvent(ev);
+
   try {
     _broadcastEvent(ev);
   } catch (e) {
@@ -227,16 +353,32 @@ function attachBotFeed(io) {
       },
     });
 
-    try {
-      socket.emit("snapshot", {
-        stats: getStats(),
-        recent: getRecentActivities(100, "all"),
-        recentBig: getRecentActivities(50, "bigwin"),
-        recentJackpot: getRecentActivities(20, "jackpot"),
-      });
-    } catch (e) {}
+    // Load snapshot FROM DB (with fallback)
+    (async () => {
+      try {
+        const [recent, recentBig, recentJackpot] = await Promise.all([
+          getRecentActivities(100, "all"),
+          getRecentActivities(50, "bigwin"),
+          getRecentActivities(20, "jackpot"),
+        ]);
+        socket.emit("snapshot", {
+          stats: getStats(),
+          recent,
+          recentBig,
+          recentJackpot,
+        });
+      } catch (e) {
+        // worst case: just send stats
+        socket.emit("snapshot", {
+          stats: getStats(),
+          recent: [],
+          recentBig: [],
+          recentJackpot: [],
+        });
+      }
+    })();
 
-    socket.on("fetch_recent", (opts, cb) => {
+    socket.on("fetch_recent", async (opts, cb) => {
       try {
         const limit =
           typeof opts === "object" && opts && Number.isFinite(Number(opts.limit))
@@ -246,11 +388,12 @@ function attachBotFeed(io) {
           typeof opts === "object" && opts && typeof opts.type === "string"
             ? opts.type
             : "all";
-        const res = getRecentActivities(limit, type);
+
+        const res = await getRecentActivities(limit, type);
         if (typeof cb === "function") cb(null, res);
         else socket.emit("recent", res);
       } catch (err) {
-        if (typeof cb === "function") cb(String(err));
+        if (typeof cb === "function") cb(String(err?.message || err));
       }
     });
   });
@@ -316,7 +459,15 @@ function triggerBigWin(payload = {}) {
     const ev = buildBigWinWithMultiplier(fallbackM, payload);
     _updateStats(ev);
     pushRecent(ev);
-    try { _broadcastEvent(ev); } catch (e) { console.warn("[bot_engine] bigwin emit failed:", e?.message || e); }
+
+    // persist big win to DB as well
+    persistFeedEvent(ev);
+
+    try {
+      _broadcastEvent(ev);
+    } catch (e) {
+      console.warn("[bot_engine] bigwin emit failed:", e?.message || e);
+    }
     if (!payload.__fromCampaign && isBigWin(ev)) _startBigWinCampaignWindow();
     return ev;
   }
@@ -333,6 +484,9 @@ function triggerBigWin(payload = {}) {
 
   _updateStats(ev);
   pushRecent(ev);
+
+  // persist big win to DB
+  persistFeedEvent(ev);
 
   try {
     _broadcastEvent(ev);
@@ -424,25 +578,43 @@ function setConfig(partial = {}) {
   CONFIG = {
     ...CONFIG,
     enabled: partial.enabled != null ? _toBool(partial.enabled, prevEnabled) : prevEnabled,
-    minMs: partial.minMs != null ? Math.max(100, _num(partial.minMs, CONFIG.minMs)) : CONFIG.minMs,
-    maxMs: partial.maxMs != null ? Math.max(200, _num(partial.maxMs, CONFIG.maxMs)) : CONFIG.maxMs,
+    minMs:
+      partial.minMs != null ? Math.max(100, _num(partial.minMs, CONFIG.minMs)) : CONFIG.minMs,
+    maxMs:
+      partial.maxMs != null ? Math.max(200, _num(partial.maxMs, CONFIG.maxMs)) : CONFIG.maxMs,
     winRate:
-      partial.winRate != null ? Math.max(0, Math.min(1, _num(partial.winRate, CONFIG.winRate))) : CONFIG.winRate,
-    minSol: partial.minSol != null ? Math.max(0, _num(partial.minSol, CONFIG.minSol)) : CONFIG.minSol,
-    maxSol: partial.maxSol != null ? Math.max(CONFIG.minSol, _num(partial.maxSol, CONFIG.maxSol)) : CONFIG.maxSol,
+      partial.winRate != null
+        ? Math.max(0, Math.min(1, _num(partial.winRate, CONFIG.winRate)))
+        : CONFIG.winRate,
+    minSol:
+      partial.minSol != null ? Math.max(0, _num(partial.minSol, CONFIG.minSol)) : CONFIG.minSol,
+    maxSol:
+      partial.maxSol != null
+        ? Math.max(CONFIG.minSol, _num(partial.maxSol, CONFIG.maxSol))
+        : CONFIG.maxSol,
     players: partial.players ? _arrStrings(partial.players, CONFIG.players) : CONFIG.players,
     games: partial.games ? _arrStrings(partial.games, CONFIG.games) : CONFIG.games,
-    multipliers: partial.multipliers ? _arrNumbers(partial.multipliers, CONFIG.multipliers) : CONFIG.multipliers,
+    multipliers: partial.multipliers
+      ? _arrNumbers(partial.multipliers, CONFIG.multipliers)
+      : CONFIG.multipliers,
 
     // thresholds (optional overrides)
     bigWinMinMult:
-      partial.bigWinMinMult != null ? Math.max(1, _num(partial.bigWinMinMult, CONFIG.bigWinMinMult)) : CONFIG.bigWinMinMult,
+      partial.bigWinMinMult != null
+        ? Math.max(1, _num(partial.bigWinMinMult, CONFIG.bigWinMinMult))
+        : CONFIG.bigWinMinMult,
     bigWinMinPayout:
-      partial.bigWinMinPayout != null ? Math.max(0, _num(partial.bigWinMinPayout, CONFIG.bigWinMinPayout)) : CONFIG.bigWinMinPayout,
+      partial.bigWinMinPayout != null
+        ? Math.max(0, _num(partial.bigWinMinPayout, CONFIG.bigWinMinPayout))
+        : CONFIG.bigWinMinPayout,
     jackpotMinMult:
-      partial.jackpotMinMult != null ? Math.max(1, _num(partial.jackpotMinMult, CONFIG.jackpotMinMult)) : CONFIG.jackpotMinMult,
+      partial.jackpotMinMult != null
+        ? Math.max(1, _num(partial.jackpotMinMult, CONFIG.jackpotMinMult))
+        : CONFIG.jackpotMinMult,
     jackpotMinPayout:
-      partial.jackpotMinPayout != null ? Math.max(0, _num(partial.jackpotMinPayout, CONFIG.jackpotMinPayout)) : CONFIG.jackpotMinPayout,
+      partial.jackpotMinPayout != null
+        ? Math.max(0, _num(partial.jackpotMinPayout, CONFIG.jackpotMinPayout))
+        : CONFIG.jackpotMinPayout,
   };
   if (CONFIG.minMs > CONFIG.maxMs) [CONFIG.minMs, CONFIG.maxMs] = [CONFIG.maxMs, CONFIG.minMs];
   if (CONFIG.minSol > CONFIG.maxSol) [CONFIG.minSol, CONFIG.maxSol] = [CONFIG.maxSol, CONFIG.minSol];
@@ -510,12 +682,12 @@ function attachBotAdmin(app) {
 
   app.get("/admin/bot/stats", (_req, res) => res.json(getStats()));
 
-  // Single history endpoint with type filter
-  app.get("/admin/bot/recent", (req, res) => {
+  // Single history endpoint with type filter – NOW FROM DB
+  app.get("/admin/bot/recent", async (req, res) => {
     try {
       const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
       const type = (req.query.type || "all").toString(); // 'all' | 'bigwin' | 'jackpot'
-      const recent = getRecentActivities(limit, type);
+      const recent = await getRecentActivities(limit, type);
       res.json(recent);
     } catch (e) {
       res.status(500).json({ error: String(e?.message || e) });
@@ -566,7 +738,7 @@ module.exports = {
   setConfig,
   getConfig,
   getStats,
-  getRecentActivities,
-  triggerBigWin, // export for programmatic triggers if needed
+  getRecentActivities, // now async, DB-backed (with fallback)
+  triggerBigWin,
   resetStats,
 };
