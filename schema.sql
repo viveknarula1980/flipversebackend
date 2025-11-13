@@ -815,3 +815,22 @@ ALTER TABLE coinflip_matches ALTER COLUMN status SET DEFAULT 'locked';
 -- indexes for your /coinflip/resolved query
 CREATE INDEX IF NOT EXISTS idx_cf_a_status_id ON coinflip_matches (player_a, status, id DESC);
 CREATE INDEX IF NOT EXISTS idx_cf_b_status_id ON coinflip_matches (player_b, status, id DESC);
+
+
+CREATE TABLE IF NOT EXISTS bot_feed_events (
+  id BIGSERIAL PRIMARY KEY,
+  user_name TEXT NOT NULL,
+  game_key TEXT NOT NULL,
+  amount_sol NUMERIC NOT NULL,
+  result TEXT NOT NULL CHECK (result IN ('win', 'loss')),
+  multiplier NUMERIC NOT NULL,
+  payout_sol NUMERIC NOT NULL DEFAULT 0,
+  is_bigwin BOOLEAN NOT NULL DEFAULT FALSE,
+  is_jackpot BOOLEAN NOT NULL DEFAULT FALSE,
+  simulated BOOLEAN NOT NULL DEFAULT TRUE,
+  ts_ms BIGINT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_bot_feed_events_created
+  ON bot_feed_events (created_at DESC);
